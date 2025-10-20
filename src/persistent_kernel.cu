@@ -8,15 +8,31 @@ __device__ __managed__ OpFn g_op_table[GPUOS_MAX_OPS];
 __device__ __managed__ int  g_op_alias[GPUOS_MAX_OPS];
 __device__ __managed__ unsigned long long g_processed_count = 0ULL;
 
-// Built-in default operator: C = A + B
+// Helpers for generic indexing (minimal, f32 only for builtin)
+static __device__ inline int64_t linear_to_offset(const TensorRef& tr, int64_t idx) {
+  // Convert linear idx into element offset using tr.sizes/tr.strides over out ndim
+  int64_t off = 0;
+  int nd = tr.ndim;
+  for (int d = nd - 1; d >= 0; --d) {
+    int64_t dim = tr.sizes[d] > 0 ? tr.sizes[d] : 1;
+    int64_t i = idx % dim;
+    idx /= dim;
+    off += i * tr.strides[d];
+  }
+  return off;
+}
+
+// Built-in default operator: C = A + B (float32 generic, supports broadcast/strides)
 extern "C" __device__ void op_add(const Task& t) {
-  const float* a = static_cast<const float*>(t.in0);
-  const float* b = static_cast<const float*>(t.in1);
-  float* c = static_cast<float*>(t.out0);
-  int n = t.n;
-  // Block-local striding: one block handles one Task
-  for (int i = threadIdx.x; i < n; i += blockDim.x) {
-    c[i] = a[i] + b[i];
+  int64_t N = t.numel;
+  for (int64_t li = threadIdx.x; li < N; li += blockDim.x) {
+    int64_t oa = linear_to_offset(t.in0, li);
+    int64_t ob = linear_to_offset(t.in1, li);
+    int64_t oc = linear_to_offset(t.out0, li);
+    const float* a = reinterpret_cast<const float*>(static_cast<const char*>(t.in0.data) + oa * sizeof(float));
+    const float* b = reinterpret_cast<const float*>(static_cast<const char*>(t.in1.data) + ob * sizeof(float));
+    float* c = reinterpret_cast<float*>(static_cast<char*>(t.out0.data) + oc * sizeof(float));
+    *c = (*a) + (*b);
   }
 }
 

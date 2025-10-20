@@ -60,6 +60,32 @@ Notes:
 - Set `GPUOS_NVRTC_ARCH` (e.g., `compute_90`) to override NVRTC arch if needed.
 - For simplicity, async `flush(sync=False)` does not reclaim the per-batch descriptor buffer immediately; use `sync=True` or add a small GC loop in production.
 
+## PyTorch Scheduler Plugin (Open-Box Usage)
+
+A lightweight TorchDispatch-based scheduler that transparently aggregates tiny pointwise ops (add/mul) into the persistent-kernel runtime. Use it as a context manager:
+
+```
+from pytorch_ext.scheduler import scheduler_context
+import torch
+
+with torch.no_grad():
+  with scheduler_context(capacity=8192, threads_per_block=256, size_threshold=1<<15, auto_flush_ms=2.0):
+    y = a + b   # small ops are queued and batched
+    z = a * b
+    # leaving the context flushes and waits
+```
+
+Demo:
+- `python examples/pytorch_scheduler_demo.py` (builds the extension on the fly and runs a quick correctness check).
+- `python examples/pytorch_scheduler_advanced_demo.py` (broadcast, non-contiguous views, mixed dtypes like fp16+fp32).
+
+Behavior and constraints:
+- Intercepts many unary/binary elementwise ops (relu/sigmoid/tanh/exp/log/sqrt/abs/sin/cos/gelu/hardsigmoid/hardswish/maximum/minimum/pow/leaky_relu/hardtanh/elu/softplus/clamp variants) in addition to add/mul/div/sub.
+- Supports broadcasting and non-contiguous input strides; outputs are contiguous by default. Mixed dtypes (fp16/bf16/fp32) compute in fp32 and cast to output dtype.
+- Falls back to regular PyTorch for unsupported ops, large tensors (beyond `size_threshold`), or when autograd is enabled (best used under `torch.no_grad()`).
+- Ensures correctness by auto-flushing synchronously if a downstream op consumes a tensor produced by the scheduler before the batch is flushed.
+- Background timer (`auto_flush_ms`) opportunistically flushes pending work to keep latency bounded.
+
 ## Notes
 - The queue is implemented with Unified Memory for simplicity. For production, prefer explicit device memory plus lightweight doorbells (atomics in mapped pinned memory) to avoid UM migration overhead.
 - `g_op_table` is declared `__managed__` to simplify host updates (we use `cudaMemcpyToSymbol` with an offset). Workers call `__threadfence()` before reading the table.

@@ -15,6 +15,7 @@
 #include <thread>
 #include <utility>
 #include <vector>
+#include <unordered_map>
 
 #include "../src/common.h"
 
@@ -65,10 +66,81 @@ static std::vector<Task> g_pending;
 static const int kBatchSlot = 10; // slot id for aggregated operator
 static bool g_batch_compiled = false;
 
+// Generic elementwise JIT operator registry
+static std::mutex g_reg_mu;
+static std::unordered_map<std::string, int> g_op_slots; // key -> slot
+static int g_next_slot = 20; // reserve [0] builtin add, [10] batch
+
 static unsigned long long get_processed_count() {
   unsigned long long c = 0;
   CUDA_RT_CHECK(cudaMemcpyFromSymbol(&c, g_processed_count, sizeof(c), 0, cudaMemcpyDeviceToHost));
   return c;
+}
+
+// ---- Helpers to build Task from torch::Tensor ----
+static int dtype_code(const torch::Tensor& t) {
+  switch (t.scalar_type()) {
+    case torch::kFloat: return (int)kF32;
+    case torch::kHalf: return (int)kF16;
+    case torch::kBFloat16: return (int)kBF16;
+    default: return (int)kF32; // fallback
+  }
+}
+
+static void fill_tensorref(TensorRef& tr, const torch::Tensor& ten, int out_ndim, const std::vector<int64_t>& out_sizes) {
+  tr.data = (void*)ten.data_ptr();
+  tr.dtype = dtype_code(ten);
+  tr.ndim = out_ndim;
+  // Align input dims to out dims (right-aligned)
+  int in_nd = (int)ten.dim();
+  auto sizes_in = ten.sizes();
+  auto strides_in = ten.strides();
+  for (int d = 0; d < out_ndim; ++d) {
+    int od = out_ndim - 1 - d;
+    int id = in_nd - 1 - d;
+    int64_t out_size = out_sizes[od];
+    int64_t size_in = (id >= 0) ? sizes_in[id] : 1;
+    int64_t stride_in = (id >= 0) ? strides_in[id] : 0;
+    tr.sizes[od] = size_in;
+    // Broadcast: if size_in == 1, set stride 0
+    tr.strides[od] = (size_in == 1) ? 0 : stride_in;
+  }
+}
+
+static void build_binary_task(Task& t, int op, const torch::Tensor& a, const torch::Tensor& b, const torch::Tensor& out) {
+  TORCH_CHECK(a.device().is_cuda() && b.device().is_cuda() && out.device().is_cuda(), "tensors must be CUDA");
+  TORCH_CHECK(a.device() == out.device() && b.device() == out.device(), "device mismatch");
+  // Compute out shape
+  std::vector<int64_t> out_sizes(out.sizes().begin(), out.sizes().end());
+  int out_ndim = (int)out_sizes.size();
+  int64_t numel = out.numel();
+  t.op = op; t.flags = 0; t.ndim = out_ndim; t.numel = numel;
+  // out0
+  t.out0.data = (void*)out.data_ptr(); t.out0.dtype = dtype_code(out); t.out0.ndim = out_ndim;
+  for (int i = 0; i < out_ndim; ++i) { t.out0.sizes[i] = out_sizes[i]; }
+  // contiguous out strides in elements
+  int64_t stride = 1;
+  for (int d = out_ndim - 1; d >= 0; --d) { t.out0.strides[d] = stride; stride *= out_sizes[d]; }
+  // inputs
+  fill_tensorref(t.in0, a, out_ndim, out_sizes);
+  fill_tensorref(t.in1, b, out_ndim, out_sizes);
+}
+
+static void build_unary_task(Task& t, int op, const torch::Tensor& x, const torch::Tensor& out) {
+  TORCH_CHECK(x.device().is_cuda() && out.device().is_cuda(), "tensors must be CUDA");
+  TORCH_CHECK(x.device() == out.device(), "device mismatch");
+  std::vector<int64_t> out_sizes(out.sizes().begin(), out.sizes().end());
+  int out_ndim = (int)out_sizes.size();
+  int64_t numel = out.numel();
+  t.op = op; t.flags = 0; t.ndim = out_ndim; t.numel = numel;
+  // out0
+  t.out0.data = (void*)out.data_ptr(); t.out0.dtype = dtype_code(out); t.out0.ndim = out_ndim;
+  for (int i = 0; i < out_ndim; ++i) { t.out0.sizes[i] = out_sizes[i]; }
+  int64_t stride = 1; for (int d = out_ndim - 1; d >= 0; --d) { t.out0.strides[d] = stride; stride *= out_sizes[d]; }
+  // input
+  fill_tensorref(t.in0, x, out_ndim, out_sizes);
+  // make in1 dummy
+  t.in1.data = nullptr; t.in1.dtype = t.in0.dtype; t.in1.ndim = out_ndim; for (int i = 0; i < out_ndim; ++i) { t.in1.sizes[i] = 1; t.in1.strides[i] = 0; }
 }
 
 static std::string arch_opt() {
@@ -80,25 +152,53 @@ static std::string arch_opt() {
 // Aggregator operator: handles a batch of micro-Tasks (reuses Task layout)
 static std::string build_batch_op_src() {
   return R"(
+  #include <cuda_fp16.h>
+  #include <cuda_bf16.h>
+  #include <math.h>
   extern "C" {
-    struct Task { int op; int n; void* in0; void* in1; void* out0; };
-    typedef void(*OpFn)(const Task&);
+    enum DType { kF32=0, kF16=1, kBF16=2, kI32=3, kF64=4 };
+    const int MAX_NDIM = 8;
+    struct TensorRef { void* data; int dtype; int ndim; long long sizes[MAX_NDIM]; long long strides[MAX_NDIM]; };
+    struct Task { int op; int flags; int ndim; long long numel; TensorRef in0; TensorRef in1; TensorRef out0; };
+
+    __device__ inline int64_t linear_to_offset(const TensorRef& tr, int64_t idx) {
+      int64_t off = 0; int nd = tr.ndim; for (int d = nd - 1; d >= 0; --d) { long long dim = tr.sizes[d] > 0 ? tr.sizes[d] : 1; long long i = idx % dim; idx /= dim; off += i * tr.strides[d]; } return off;
+    }
+    __device__ inline float ld_as_float(const TensorRef& tr, int64_t off_elems) {
+      char* base = (char*)tr.data;
+      switch (tr.dtype) {
+        case kF32: return ((float*)base)[off_elems];
+        case kF16: return __half2float(((const __half*)base)[off_elems]);
+        case kBF16: return __bfloat162float(((const __nv_bfloat16*)base)[off_elems]);
+        default: return ((float*)base)[off_elems];
+      }
+    }
+    __device__ inline void st_from_float(const TensorRef& tr, int64_t off_elems, float v) {
+      char* base = (char*)tr.data;
+      switch (tr.dtype) {
+        case kF32: ((float*)base)[off_elems] = v; break;
+        case kF16: ((__half*)base)[off_elems] = __float2half_rn(v); break;
+        case kBF16: ((__nv_bfloat16*)base)[off_elems] = __float2bfloat16(v); break;
+        default: ((float*)base)[off_elems] = v; break;
+      }
+    }
+
     __device__ void op_batch(const Task& t) {
-      const Task* req = (const Task*)t.in0;
-      int m = t.n;
+      const Task* req = (const Task*)t.in0.data;
+      int m = (int)t.numel; // using numel to carry count of sub-tasks
       for (int k = 0; k < m; ++k) {
         const Task& u = req[k];
-        if (u.op == 0) {
-          const float* a = (const float*)u.in0;
-          const float* b = (const float*)u.in1;
-          float* c = (float*)u.out0;
-          for (int i = threadIdx.x; i < u.n; i += blockDim.x) c[i] = a[i] + b[i];
-        } else if (u.op == 1) {
-          const float* a = (const float*)u.in0;
-          const float* b = (const float*)u.in1;
-          float* c = (float*)u.out0;
-          for (int i = threadIdx.x; i < u.n; i += blockDim.x) c[i] = a[i] * b[i];
+        long long N = u.numel;
+        for (long long li = threadIdx.x; li < N; li += blockDim.x) {
+          long long oa = linear_to_offset(u.in0, li);
+          long long ob = linear_to_offset(u.in1, li);
+          long long oc = linear_to_offset(u.out0, li);
+          float A = ld_as_float(u.in0, oa);
+          float B = ld_as_float(u.in1, ob);
+          float R = (u.op == 0) ? (A + B) : (A * B);
+          st_from_float(u.out0, oc, R);
         }
+        __syncthreads();
       }
     }
     __device__ void* op_batch_ptr = (void*)op_batch;
@@ -188,21 +288,13 @@ void shutdown() {
 // Enqueue a micro-request into host-side pending list
 void submit_add(torch::Tensor a, torch::Tensor b, torch::Tensor out) {
   TORCH_CHECK(g_started, "gpuos not initialized");
-  TORCH_CHECK(a.is_cuda() && b.is_cuda() && out.is_cuda(), "tensors must be CUDA");
-  TORCH_CHECK(a.is_contiguous() && b.is_contiguous() && out.is_contiguous(), "tensors must be contiguous");
-  TORCH_CHECK(a.dtype() == torch::kFloat32 && b.dtype() == torch::kFloat32 && out.dtype() == torch::kFloat32, "dtype must be float32");
-  TORCH_CHECK(a.numel() == b.numel() && a.numel() == out.numel(), "size mismatch");
-  Task t{}; t.op = 0; t.n = (int)a.numel(); t.in0 = a.data_ptr(); t.in1 = b.data_ptr(); t.out0 = out.data_ptr();
+  Task t{}; build_binary_task(t, /*op=*/0, a, b, out);
   std::lock_guard<std::mutex> lock(g_mu); g_pending.push_back(t);
 }
 
 void submit_mul(torch::Tensor a, torch::Tensor b, torch::Tensor out) {
   TORCH_CHECK(g_started, "gpuos not initialized");
-  TORCH_CHECK(a.is_cuda() && b.is_cuda() && out.is_cuda(), "tensors must be CUDA");
-  TORCH_CHECK(a.is_contiguous() && b.is_contiguous() && out.is_contiguous(), "tensors must be contiguous");
-  TORCH_CHECK(a.dtype() == torch::kFloat32 && b.dtype() == torch::kFloat32 && out.dtype() == torch::kFloat32, "dtype must be float32");
-  TORCH_CHECK(a.numel() == b.numel() && a.numel() == out.numel(), "size mismatch");
-  Task t{}; t.op = 1; t.n = (int)a.numel(); t.in0 = a.data_ptr(); t.in1 = b.data_ptr(); t.out0 = out.data_ptr();
+  Task t{}; build_binary_task(t, /*op=*/1, a, b, out);
   std::lock_guard<std::mutex> lock(g_mu); g_pending.push_back(t);
 }
 
@@ -219,8 +311,10 @@ void flush(bool sync) {
   Task* d_subs = nullptr;
   CUDA_RT_CHECK(cudaMallocManaged(&d_subs, local.size() * sizeof(Task)));
   std::memcpy(d_subs, local.data(), local.size() * sizeof(Task));
-  // Publish a batch Task to queue
-  Task batch{}; batch.op = kBatchSlot; batch.n = (int)local.size(); batch.in0 = d_subs; batch.in1 = nullptr; batch.out0 = nullptr;
+  // Publish a batch Task to queue; carry sub-task count in numel, and pass pointer via in0.data
+  Task batch{}; batch.op = kBatchSlot; batch.flags = 0; batch.ndim = 1; batch.numel = (long long)local.size();
+  batch.in0.data = d_subs; batch.in0.dtype = kF32; batch.in0.ndim = 1; batch.in0.sizes[0] = (long long)local.size(); batch.in0.strides[0] = 1;
+  batch.in1.data = nullptr; batch.out0.data = nullptr;
   int tail = 0;
   // Enqueue into ring buffer (single producer)
   tail = *g_q.tail; g_q.tasks[tail % g_q.capacity] = batch; *g_q.tail = tail + 1;
@@ -239,13 +333,109 @@ void flush(bool sync) {
   }
 }
 
+// -------- Generic elementwise JIT (float32 contiguous, unary/binary) --------
+static std::string build_elementwise_src(const std::string& expr, int arity) {
+  // Generate a generic elementwise kernel over TensorRef with dtype/broadcast/strides support.
+  std::string src;
+  src += R"(
+  #include <cuda_fp16.h>
+  #include <cuda_bf16.h>
+  #include <math.h>
+  extern "C" {
+    enum DType { kF32=0, kF16=1, kBF16=2, kI32=3, kF64=4 };
+    const int MAX_NDIM = 8;
+    struct TensorRef { void* data; int dtype; int ndim; long long sizes[MAX_NDIM]; long long strides[MAX_NDIM]; };
+    struct Task { int op; int flags; int ndim; long long numel; TensorRef in0; TensorRef in1; TensorRef out0; };
+    __device__ inline long long linear_to_offset(const TensorRef& tr, long long idx) {
+      long long off = 0; int nd = tr.ndim; for (int d = nd - 1; d >= 0; --d) { long long dim = tr.sizes[d] > 0 ? tr.sizes[d] : 1; long long i = idx % dim; idx /= dim; off += i * tr.strides[d]; } return off;
+    }
+    __device__ inline float ld_as_float(const TensorRef& tr, long long off_elems) {
+      char* base = (char*)tr.data; switch (tr.dtype) {
+        case kF32: return ((float*)base)[off_elems];
+        case kF16: return __half2float(((const __half*)base)[off_elems]);
+        case kBF16: return __bfloat162float(((const __nv_bfloat16*)base)[off_elems]);
+        default: return ((float*)base)[off_elems];
+      }
+    }
+    __device__ inline void st_from_float(const TensorRef& tr, long long off_elems, float v) {
+      char* base = (char*)tr.data; switch (tr.dtype) {
+        case kF32: ((float*)base)[off_elems] = v; break;
+        case kF16: ((__half*)base)[off_elems] = __float2half_rn(v); break;
+        case kBF16: ((__nv_bfloat16*)base)[off_elems] = __float2bfloat16(v); break;
+        default: ((float*)base)[off_elems] = v; break;
+      }
+    }
+    __device__ void op_impl(const Task& t) {
+      long long N = t.numel;
+      for (long long li = threadIdx.x; li < N; li += blockDim.x) {
+        long long oa = linear_to_offset(t.in0, li);
+        float A = ld_as_float(t.in0, oa);
+  )";
+  if (arity == 2) {
+    src += R"(
+        long long ob = linear_to_offset(t.in1, li);
+        float B = ld_as_float(t.in1, ob);
+    )";
+  }
+  src += "        float R = " + (arity == 1 ? std::string("(") + expr + ")" : std::string("(") + expr + ")") + ";\n";
+  src += R"(
+        long long oc = linear_to_offset(t.out0, li);
+        st_from_float(t.out0, oc, R);
+      }
+    }
+    __device__ void* op_impl_ptr = (void*)op_impl;
+  }
+  )";
+  return src;
+}
+
+static int ensure_elementwise_registered(const std::string& key, const std::string& expr, int arity) {
+  std::lock_guard<std::mutex> lock(g_reg_mu);
+  auto it = g_op_slots.find(key);
+  if (it != g_op_slots.end()) return it->second;
+  auto ptx = nvrtc_compile_ptx(build_elementwise_src(expr, arity));
+  OpPtrInt addr = load_ptr_from_ptx(ptx, "op_impl_ptr");
+  int slot = g_next_slot++;
+  set_table_slot_async(slot, addr);
+  CUDA_RT_CHECK(cudaStreamSynchronize(g_ctrl_stream));
+  g_op_slots.emplace(key, slot);
+  return slot;
+}
+
+// Submitters for generic elementwise ops
+void submit_unary(int slot, torch::Tensor a, torch::Tensor out) {
+  TORCH_CHECK(g_started, "gpuos not initialized");
+  TORCH_CHECK(a.is_cuda() && out.is_cuda(), "tensors must be CUDA");
+  TORCH_CHECK(a.is_contiguous() && out.is_contiguous(), "tensors must be contiguous");
+  TORCH_CHECK(a.dtype() == torch::kFloat32 && out.dtype() == torch::kFloat32, "dtype must be float32");
+  TORCH_CHECK(a.numel() == out.numel(), "size mismatch");
+  Task t{}; t.op = slot; t.n = (int)a.numel(); t.in0 = a.data_ptr(); t.in1 = nullptr; t.out0 = out.data_ptr();
+  std::lock_guard<std::mutex> lock(g_mu);
+  int tail = *g_q.tail; g_q.tasks[tail % g_q.capacity] = t; *g_q.tail = tail + 1;
+}
+
+void submit_binary(int slot, torch::Tensor a, torch::Tensor b, torch::Tensor out) {
+  TORCH_CHECK(g_started, "gpuos not initialized");
+  TORCH_CHECK(a.is_cuda() && b.is_cuda() && out.is_cuda(), "tensors must be CUDA");
+  TORCH_CHECK(a.is_contiguous() && b.is_contiguous() && out.is_contiguous(), "tensors must be contiguous");
+  TORCH_CHECK(a.dtype() == torch::kFloat32 && b.dtype() == torch::kFloat32 && out.dtype() == torch::kFloat32, "dtype must be float32");
+  TORCH_CHECK(a.numel() == b.numel() && a.numel() == out.numel(), "size mismatch");
+  Task t{}; t.op = slot; t.n = (int)a.numel(); t.in0 = a.data_ptr(); t.in1 = b.data_ptr(); t.out0 = out.data_ptr();
+  std::lock_guard<std::mutex> lock(g_mu);
+  int tail = *g_q.tail; g_q.tasks[tail % g_q.capacity] = t; *g_q.tail = tail + 1;
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("init", &init, "Initialize GPUOS persistent runtime", py::arg("capacity")=4096, py::arg("threads_per_block")=256);
   m.def("shutdown", &shutdown, "Shutdown GPUOS runtime");
   m.def("submit_add", &submit_add, "Submit add micro-op");
   m.def("submit_mul", &submit_mul, "Submit mul micro-op");
   m.def("flush", &flush, "Flush pending micro-ops", py::arg("sync")=false);
+  m.def("register_elementwise", [](const std::string& key, const std::string& expr, int arity){
+      return ensure_elementwise_registered(key, expr, arity);
+    }, "Register JIT elementwise op and return slot");
+  m.def("submit_unary", &submit_unary, "Submit unary op for a slot");
+  m.def("submit_binary", &submit_binary, "Submit binary op for a slot");
 }
 
 } // namespace gpuos_ext
-

@@ -124,7 +124,7 @@ int main(){
   auto prefetch_q = [&](){ CUDA_RT_CHECK(cudaMemPrefetchAsync(q.tasks,q.capacity*sizeof(Task),dev,s_ctrl)); CUDA_RT_CHECK(cudaMemPrefetchAsync(q.head,sizeof(int),dev,s_ctrl)); CUDA_RT_CHECK(cudaMemPrefetchAsync(q.tail,sizeof(int),dev,s_ctrl)); CUDA_RT_CHECK(cudaMemPrefetchAsync(q.quit,sizeof(int),dev,s_ctrl)); };
 
   // Batch1: logical op L=0 routed to slot 0 (add) -> C1
-  for(int t=0;t<b1;++t){ Task tk; tk.op=0; tk.n=N; tk.in0=A; tk.in1=B; tk.out0=C1; q.tasks[t%q.capacity]=tk; }
+  for(int t=0;t<b1;++t){ Task tk{}; tk.op=0; tk.flags=0; tk.ndim=1; tk.numel=N; tk.in0={A,kF32,1,{N,0,0,0,0,0,0,0},{1,0,0,0,0,0,0,0}}; tk.in1={B,kF32,1,{N,0,0,0,0,0,0,0},{1,0,0,0,0,0,0,0}}; tk.out0={C1,kF32,1,{N,0,0,0,0,0,0,0},{1,0,0,0,0,0,0,0}}; q.tasks[t%q.capacity]=tk; }
   *q.tail = b1; prefetch_q(); CUDA_RT_CHECK(cudaMemPrefetchAsync(A,(size_t)N*sizeof(float),dev,s_ctrl)); CUDA_RT_CHECK(cudaMemPrefetchAsync(B,(size_t)N*sizeof(float),dev,s_ctrl)); CUDA_RT_CHECK(cudaMemPrefetchAsync(C1,(size_t)N*sizeof(float),dev,s_ctrl)); CUDA_RT_CHECK(cudaStreamSynchronize(s_ctrl)); while(get_done(s_ctrl) < (unsigned long long)b1) std::this_thread::sleep_for(std::chrono::milliseconds(5));
 
   // Prepare backup: JIT mul into physical slot 1 (backup)
@@ -134,14 +134,14 @@ int main(){
   set_alias_async(/*logical=*/0, /*physical=*/1, s_ctrl); CUDA_RT_CHECK(cudaStreamSynchronize(s_ctrl));
 
   // Batch2: logical op 0 now uses mul -> C2
-  for(int t=0;t<b2;++t){ Task tk; tk.op=0; tk.n=N; tk.in0=A; tk.in1=B; tk.out0=C2; q.tasks[(b1+t)%q.capacity]=tk; }
+  for(int t=0;t<b2;++t){ Task tk{}; tk.op=0; tk.flags=0; tk.ndim=1; tk.numel=N; tk.in0={A,kF32,1,{N,0,0,0,0,0,0,0},{1,0,0,0,0,0,0,0}}; tk.in1={B,kF32,1,{N,0,0,0,0,0,0,0},{1,0,0,0,0,0,0,0}}; tk.out0={C2,kF32,1,{N,0,0,0,0,0,0,0},{1,0,0,0,0,0,0,0}}; q.tasks[(b1+t)%q.capacity]=tk; }
   *q.tail = b1 + b2; prefetch_q(); CUDA_RT_CHECK(cudaMemPrefetchAsync(C2,(size_t)N*sizeof(float),dev,s_ctrl)); CUDA_RT_CHECK(cudaMemPrefetchAsync(q.tail,sizeof(int),dev,s_ctrl)); CUDA_RT_CHECK(cudaStreamSynchronize(s_ctrl)); while(get_done(s_ctrl) < (unsigned long long)(b1+b2)) std::this_thread::sleep_for(std::chrono::milliseconds(5));
 
   // Rollback: alias logical 0 -> physical 0 (add)
   set_alias_async(/*logical=*/0, /*physical=*/0, s_ctrl); CUDA_RT_CHECK(cudaStreamSynchronize(s_ctrl));
 
   // Batch3: logical op 0 now back to add -> C3
-  for(int t=0;t<b3;++t){ Task tk; tk.op=0; tk.n=N; tk.in0=A; tk.in1=B; tk.out0=C3; q.tasks[(b1+b2+t)%q.capacity]=tk; }
+  for(int t=0;t<b3;++t){ Task tk{}; tk.op=0; tk.flags=0; tk.ndim=1; tk.numel=N; tk.in0={A,kF32,1,{N,0,0,0,0,0,0,0},{1,0,0,0,0,0,0,0}}; tk.in1={B,kF32,1,{N,0,0,0,0,0,0,0},{1,0,0,0,0,0,0,0}}; tk.out0={C3,kF32,1,{N,0,0,0,0,0,0,0},{1,0,0,0,0,0,0,0}}; q.tasks[(b1+b2+t)%q.capacity]=tk; }
   *q.tail = b1 + b2 + b3; prefetch_q(); CUDA_RT_CHECK(cudaMemPrefetchAsync(C3,(size_t)N*sizeof(float),dev,s_ctrl)); CUDA_RT_CHECK(cudaMemPrefetchAsync(q.tail,sizeof(int),dev,s_ctrl)); CUDA_RT_CHECK(cudaStreamSynchronize(s_ctrl)); while(get_done(s_ctrl) < (unsigned long long)(b1+b2+b3)) std::this_thread::sleep_for(std::chrono::milliseconds(5));
 
   // Stop

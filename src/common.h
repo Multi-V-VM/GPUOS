@@ -3,19 +3,42 @@
 #pragma once
 
 #include <cuda_runtime.h>
+#include <stdint.h>
 
 // Max number of operators in the jump table
 #ifndef GPUOS_MAX_OPS
 #define GPUOS_MAX_OPS 128
 #endif
 
+// DType codes (must match JIT)
+enum DType : int {
+  kF32 = 0,
+  kF16 = 1,
+  kBF16 = 2,
+  kI32 = 3,
+  kF64 = 4,
+};
+
+static constexpr int MAX_NDIM = 8;
+
+// Tensor reference with shape/stride metadata (strides in elements)
+struct TensorRef {
+  void*      data;
+  int        dtype;               // DType code
+  int        ndim;                // number of dimensions
+  int64_t    sizes[MAX_NDIM];     // per-dimension sizes
+  int64_t    strides[MAX_NDIM];   // per-dimension strides (in elements)
+};
+
 // Task descriptor (ABI must match JIT code)
 struct Task {
-  int   op;     // operator id
-  int   n;      // number of elements
-  void* in0;    // input 0
-  void* in1;    // input 1 (optional)
-  void* out0;   // output 0
+  int        op;        // operator id
+  int        flags;     // reserved/attributes
+  int        ndim;      // output ndim (redundant with out0.ndim; for convenience)
+  int64_t    numel;     // total number of output elements
+  TensorRef  in0;       // input 0
+  TensorRef  in1;       // input 1 (optional)
+  TensorRef  out0;      // output 0
 };
 
 // Work queue (host producer, device consumers)

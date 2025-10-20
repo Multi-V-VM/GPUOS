@@ -164,7 +164,11 @@ int main() {
   // Batch 1: op 0 (add) -> C_add
   const int batch1 = 128, batch2 = 128;
   for (int t = 0; t < batch1; ++t) {
-    Task tk; tk.op = 0; tk.n = N; tk.in0 = A; tk.in1 = B; tk.out0 = C_add; q.tasks[t % q.capacity] = tk;
+    Task tk{}; tk.op = 0; tk.flags=0; tk.ndim=1; tk.numel=N;
+    tk.in0 = {A, kF32, 1, {N,0,0,0,0,0,0,0}, {1,0,0,0,0,0,0,0}};
+    tk.in1 = {B, kF32, 1, {N,0,0,0,0,0,0,0}, {1,0,0,0,0,0,0,0}};
+    tk.out0= {C_add, kF32, 1,{N,0,0,0,0,0,0,0},{1,0,0,0,0,0,0,0}};
+    q.tasks[t % q.capacity] = tk;
   }
   *q.tail = batch1;
   int dev = 0; CUDA_RT_CHECK(cudaGetDevice(&dev));
@@ -192,7 +196,11 @@ int main() {
 
   // Batch 2: still op 0 but now mul -> C_mul
   for (int t = 0; t < batch2; ++t) {
-    Task tk; tk.op = 0; tk.n = N; tk.in0 = A; tk.in1 = B; tk.out0 = C_mul; q.tasks[(batch1 + t) % q.capacity] = tk;
+    Task tk{}; tk.op = 0; tk.flags=0; tk.ndim=1; tk.numel=N;
+    tk.in0 = {A, kF32, 1, {N,0,0,0,0,0,0,0}, {1,0,0,0,0,0,0,0}};
+    tk.in1 = {B, kF32, 1, {N,0,0,0,0,0,0,0}, {1,0,0,0,0,0,0,0}};
+    tk.out0= {C_mul, kF32, 1,{N,0,0,0,0,0,0,0},{1,0,0,0,0,0,0,0}};
+    q.tasks[(batch1 + t) % q.capacity] = tk;
   }
   *q.tail = batch1 + batch2;
   CUDA_RT_CHECK(cudaMemPrefetchAsync(C_mul, (size_t)N * sizeof(float), dev, s_ctrl));

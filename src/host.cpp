@@ -225,15 +225,20 @@ int main() {
     std::cout << "Updated op[1] via JIT to op_mul (C=A*B)" << std::endl;
   }
 
-  // Prepare and publish tasks (use op 1 = mul)
+  // Prepare and publish tasks (use op 1 = mul) with new Task layout
   {
     for (int t = 0; t < num_tasks; ++t) {
-      Task tk;
+      Task tk{};
       tk.op = 1; // op_mul
-      tk.n = N;
-      tk.in0 = A;
-      tk.in1 = B;
-      tk.out0 = C;
+      tk.flags = 0;
+      tk.ndim = 1;
+      tk.numel = N;
+      // in0
+      tk.in0.data = A; tk.in0.dtype = kF32; tk.in0.ndim = 1; tk.in0.sizes[0] = N; tk.in0.strides[0] = 1;
+      // in1
+      tk.in1.data = B; tk.in1.dtype = kF32; tk.in1.ndim = 1; tk.in1.sizes[0] = N; tk.in1.strides[0] = 1;
+      // out0
+      tk.out0.data = C; tk.out0.dtype = kF32; tk.out0.ndim = 1; tk.out0.sizes[0] = N; tk.out0.strides[0] = 1;
       q.tasks[t % q.capacity] = tk;
     }
     // Publish tail after writing tasks
