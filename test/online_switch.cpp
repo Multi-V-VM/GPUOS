@@ -59,7 +59,7 @@ static std::string build_op_mul_src() {
         const float* b = (const float*)t.in1;
         float* c = (float*)t.out0;
         int n = t.n;
-        for (int i = threadIdx.x + blockIdx.x * blockDim.x; i < n; i += blockDim.x * gridDim.x) {
+        for (int i = threadIdx.x; i < n; i += blockDim.x) {
           c[i] = a[i] * b[i];
         }
       }
@@ -233,4 +233,3 @@ int main() {
   CUDA_RT_CHECK(cudaStreamDestroy(s_ctrl));
   return ok ? 0 : 1;
 }
-

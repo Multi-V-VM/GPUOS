@@ -14,7 +14,8 @@ extern "C" __device__ void op_add(const Task& t) {
   const float* b = static_cast<const float*>(t.in1);
   float* c = static_cast<float*>(t.out0);
   int n = t.n;
-  for (int i = threadIdx.x + blockIdx.x * blockDim.x; i < n; i += blockDim.x * gridDim.x) {
+  // Block-local striding: one block handles one Task
+  for (int i = threadIdx.x; i < n; i += blockDim.x) {
     c[i] = a[i] + b[i];
   }
 }
@@ -34,28 +35,42 @@ extern "C" __global__ void init_builtin_ops() {
 // Persistent worker kernel: each thread acts as a consumer
 extern "C" __global__ void persistent_worker(WorkQueue q) {
   if (q.capacity == 0) return;
+  __shared__ Task s_task;
+  __shared__ int s_has_work;
   while (atomicAdd(q.quit, 0) == 0) {
-    int idx = atomicAdd(q.head, 1);
-    if (idx >= atomicAdd(q.tail, 0)) {
+    if (threadIdx.x == 0) {
+      int idx = atomicAdd(q.head, 1);
+      int tail = atomicAdd(q.tail, 0);
+      if (idx < tail) {
+        s_task = q.tasks[idx % q.capacity];
+        s_has_work = 1;
+      } else {
+        s_has_work = 0;
+      }
+    }
+    __syncthreads();
+    if (!s_has_work) {
       __nanosleep(1000);
       continue;
     }
 
-    Task t = q.tasks[idx % q.capacity];
-
     // Ensure we observe the latest function table contents
     __threadfence();
     OpFn fn = nullptr;
-    if (t.op >= 0 && t.op < GPUOS_MAX_OPS) {
-      int phys = atomicAdd(&g_op_alias[t.op], 0); // atomic read alias
+    if (s_task.op >= 0 && s_task.op < GPUOS_MAX_OPS) {
+      int phys = atomicAdd(&g_op_alias[s_task.op], 0);
       if (phys >= 0 && phys < GPUOS_MAX_OPS) {
         unsigned long long p = atomicAdd((unsigned long long*)&g_op_table[phys], 0ULL);
         fn = (OpFn)p;
       }
     }
     if (fn) {
-      fn(t);
-      atomicAdd(&g_processed_count, 1ULL);
+      fn(s_task);
+      __syncthreads();
+      if (threadIdx.x == 0) {
+        atomicAdd(&g_processed_count, 1ULL);
+      }
     }
+    __syncthreads();
   }
 }

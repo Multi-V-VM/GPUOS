@@ -30,6 +30,36 @@ cmake --build . -j
 ```
 You should see the host JIT-inject `op[1] = op_mul` and the persistent kernel will call through the updated function pointer for tasks with `op=1`. The program waits for completion, signals the kernel to stop, and verifies `C = A * B` on a few elements.
 
+### Tests
+- Online in-place switch (overwrite slot 0): `./test_online_switch`
+- Dual-slot alias switch with rollback (logical 0 -> slot 0/1): `./test_dual_slot_switch`
+
+## PyTorch: Continuous Small Requests + Runtime JIT Aggregation
+
+A minimal PyTorch extension demonstrates micro-batching many tiny ops and executing them as a single aggregated operator compiled at runtime with NVRTC.
+
+What it does:
+- Exposes functions to submit tiny add/mul requests on CUDA tensors without launching individual kernels.
+- Accumulates pending requests on the host and, on `flush()`, JIT-compiles a batch operator (`op_batch`) via NVRTC (once) and enqueues a single Task that processes the entire batch on the persistent kernel.
+- The batch operator iterates sub-requests and uses block-local threading to process each, maximizing GPU utilization without per-request launch overhead.
+
+Build/run (example):
+- Using dynamic build in-place with PyTorch tools:
+  - `python examples/pytorch_batch_demo.py`
+- Or pre-build the extension:
+  - `cd pytorch_ext && python setup.py build_ext --inplace`
+  - Then import `gpuos_ext` in Python.
+
+API (gpuos_ext):
+- `init(capacity=4096, threads_per_block=256)` — allocates queue, launches persistent kernel, installs builtins.
+- `submit_add(a, b, out)` / `submit_mul(a, b, out)` — enqueue micro-requests to host-side pending buffer (expects float32 CUDA tensors).
+- `flush(sync=False)` — JIT-install `op_batch` (once) and publish a single aggregated Task pointing to the batch of requests. With `sync=True`, waits for completion.
+- `shutdown()` — signals quit and joins the persistent kernel.
+
+Notes:
+- Set `GPUOS_NVRTC_ARCH` (e.g., `compute_90`) to override NVRTC arch if needed.
+- For simplicity, async `flush(sync=False)` does not reclaim the per-batch descriptor buffer immediately; use `sync=True` or add a small GC loop in production.
+
 ## Notes
 - The queue is implemented with Unified Memory for simplicity. For production, prefer explicit device memory plus lightweight doorbells (atomics in mapped pinned memory) to avoid UM migration overhead.
 - `g_op_table` is declared `__managed__` to simplify host updates (we use `cudaMemcpyToSymbol` with an offset). Workers call `__threadfence()` before reading the table.
