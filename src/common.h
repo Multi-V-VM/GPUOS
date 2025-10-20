@@ -35,4 +35,5 @@ using OpPtrInt = unsigned long long;
 
 // Globals for control (defined in .cu)
 extern __device__ __managed__ OpFn g_op_table[GPUOS_MAX_OPS];
+extern __device__ __managed__ int  g_op_alias[GPUOS_MAX_OPS];
 extern __device__ __managed__ unsigned long long g_processed_count;

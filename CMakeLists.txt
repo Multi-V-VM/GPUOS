@@ -31,3 +31,32 @@ target_link_libraries(persistent_jit PRIVATE
   CUDA::cudart
 )
 
+# Test: online switch mid-run (add -> mul in slot 0)
+add_executable(test_online_switch
+  test/online_switch.cpp
+  src/persistent_kernel.cu
+  src/common.h
+)
+
+set_target_properties(test_online_switch PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+target_include_directories(test_online_switch PRIVATE ${CUDAToolkit_INCLUDE_DIRS} src)
+target_link_libraries(test_online_switch PRIVATE
+  CUDA::cuda_driver
+  CUDA::nvrtc
+  CUDA::cudart
+)
+
+# Test: dual-slot master/backup alias switching with rollback
+add_executable(test_dual_slot_switch
+  test/dual_slot_switch.cpp
+  src/persistent_kernel.cu
+  src/common.h
+)
+
+set_target_properties(test_dual_slot_switch PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+target_include_directories(test_dual_slot_switch PRIVATE ${CUDAToolkit_INCLUDE_DIRS} src)
+target_link_libraries(test_dual_slot_switch PRIVATE
+  CUDA::cuda_driver
+  CUDA::nvrtc
+  CUDA::cudart
+)

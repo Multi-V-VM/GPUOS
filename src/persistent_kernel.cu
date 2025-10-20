@@ -5,6 +5,7 @@
 
 // Global jump table and counters
 __device__ __managed__ OpFn g_op_table[GPUOS_MAX_OPS];
+__device__ __managed__ int  g_op_alias[GPUOS_MAX_OPS];
 __device__ __managed__ unsigned long long g_processed_count = 0ULL;
 
 // Built-in default operator: C = A + B
@@ -23,6 +24,7 @@ extern "C" __global__ void init_builtin_ops() {
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
   if (idx < GPUOS_MAX_OPS) {
     g_op_table[idx] = nullptr;
+    g_op_alias[idx] = idx; // identity mapping
   }
   if (idx == 0) {
     g_op_table[0] = op_add;
@@ -45,9 +47,11 @@ extern "C" __global__ void persistent_worker(WorkQueue q) {
     __threadfence();
     OpFn fn = nullptr;
     if (t.op >= 0 && t.op < GPUOS_MAX_OPS) {
-      // Atomic 64-bit read-as-add(0) to avoid compiler reordering
-      unsigned long long has_val = atomicAdd((unsigned long long*)&g_op_table[t.op], 0ULL);
-      fn = (OpFn)has_val;
+      int phys = atomicAdd(&g_op_alias[t.op], 0); // atomic read alias
+      if (phys >= 0 && phys < GPUOS_MAX_OPS) {
+        unsigned long long p = atomicAdd((unsigned long long*)&g_op_table[phys], 0ULL);
+        fn = (OpFn)p;
+      }
     }
     if (fn) {
       fn(t);
