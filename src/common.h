@@ -36,6 +36,10 @@ struct Task {
   int        flags;     // reserved/attributes
   int        ndim;      // output ndim (redundant with out0.ndim; for convenience)
   int64_t    numel;     // total number of output elements
+  // Reduction metadata (optional)
+  int        rrank;                     // number of reduced axes (0 for elementwise)
+  int        r_axes[MAX_NDIM];          // reduced axes indices w.r.t. input dims
+  int        r_keepdim;                 // keepdim flag (0/1)
   TensorRef  in0;       // input 0
   TensorRef  in1;       // input 1 (optional)
   TensorRef  out0;      // output 0

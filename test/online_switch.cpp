@@ -51,18 +51,18 @@ static const char* cu_errstr(CUresult r) {
 // JIT source: op_mul with pointer bridge
 static std::string build_op_mul_src() {
   return R"(
+    #include <cuda_fp16.h>
+    #include <cuda_bf16.h>
+    #include <math.h>
     extern "C" {
-      struct Task { int op; int n; void* in0; void* in1; void* out0; };
-      typedef void(*OpFn)(const Task&);
-      __device__ void op_mul(const Task& t) {
-        const float* a = (const float*)t.in0;
-        const float* b = (const float*)t.in1;
-        float* c = (float*)t.out0;
-        int n = t.n;
-        for (int i = threadIdx.x; i < n; i += blockDim.x) {
-          c[i] = a[i] * b[i];
-        }
-      }
+      enum DType { kF32=0, kF16=1, kBF16=2, kI32=3, kF64=4 };
+      const int MAX_NDIM = 8;
+      struct TensorRef { void* data; int dtype; int ndim; long long sizes[MAX_NDIM]; long long strides[MAX_NDIM]; };
+      struct Task { int op; int flags; int ndim; long long numel; int rrank; int r_axes[MAX_NDIM]; int r_keepdim; TensorRef in0; TensorRef in1; TensorRef out0; };
+      __device__ inline long long linear_to_offset(const TensorRef& tr, long long idx) { long long off=0; int nd=tr.ndim; for (int d=nd-1; d>=0; --d){ long long dim=tr.sizes[d]>0?tr.sizes[d]:1; long long i=idx%dim; idx/=dim; off+=i*tr.strides[d]; } return off; }
+      __device__ inline float ld_as_float(const TensorRef& tr, long long off) { char* base=(char*)tr.data; switch(tr.dtype){ case kF32: return ((float*)base)[off]; case kF16: return __half2float(((const __half*)base)[off]); case kBF16: return __bfloat162float(((const __nv_bfloat16*)base)[off]); default: return ((float*)base)[off]; } }
+      __device__ inline void st_from_float(const TensorRef& tr, long long off, float v) { char* base=(char*)tr.data; switch(tr.dtype){ case kF32: ((float*)base)[off]=v; break; case kF16: ((__half*)base)[off]=__float2half_rn(v); break; case kBF16: ((__nv_bfloat16*)base)[off]=__float2bfloat16(v); break; default: ((float*)base)[off]=v; break; } }
+      __device__ void op_mul(const Task& t) { long long N=t.numel; for(long long li=threadIdx.x; li<N; li+=blockDim.x){ long long oa=linear_to_offset(t.in0,li); long long ob=linear_to_offset(t.in1,li); long long oc=linear_to_offset(t.out0,li); float R = ld_as_float(t.in0,oa) * ld_as_float(t.in1,ob); st_from_float(t.out0,oc,R);} }
       __device__ void* op_mul_ptr = (void*)op_mul;
     }
   )";
@@ -171,14 +171,14 @@ int main() {
     q.tasks[t % q.capacity] = tk;
   }
   *q.tail = batch1;
-  int dev = 0; CUDA_RT_CHECK(cudaGetDevice(&dev));
-  CUDA_RT_CHECK(cudaMemPrefetchAsync(q.tasks, q.capacity * sizeof(Task), dev, s_ctrl));
-  CUDA_RT_CHECK(cudaMemPrefetchAsync(q.head, sizeof(int), dev, s_ctrl));
-  CUDA_RT_CHECK(cudaMemPrefetchAsync(q.tail, sizeof(int), dev, s_ctrl));
-  CUDA_RT_CHECK(cudaMemPrefetchAsync(q.quit, sizeof(int), dev, s_ctrl));
-  CUDA_RT_CHECK(cudaMemPrefetchAsync(A, (size_t)N * sizeof(float), dev, s_ctrl));
-  CUDA_RT_CHECK(cudaMemPrefetchAsync(B, (size_t)N * sizeof(float), dev, s_ctrl));
-  CUDA_RT_CHECK(cudaMemPrefetchAsync(C_add, (size_t)N * sizeof(float), dev, s_ctrl));
+  int device_ordinal = 0; CUDA_RT_CHECK(cudaGetDevice(&device_ordinal));
+  CUDA_RT_CHECK(cudaMemPrefetchAsync(q.tasks, static_cast<size_t>(q.capacity) * sizeof(Task), device_ordinal, s_ctrl));
+  CUDA_RT_CHECK(cudaMemPrefetchAsync(q.head, sizeof(int), device_ordinal, s_ctrl));
+  CUDA_RT_CHECK(cudaMemPrefetchAsync(q.tail, sizeof(int), device_ordinal, s_ctrl));
+  CUDA_RT_CHECK(cudaMemPrefetchAsync(q.quit, sizeof(int), device_ordinal, s_ctrl));
+  CUDA_RT_CHECK(cudaMemPrefetchAsync(A, static_cast<size_t>(N) * sizeof(float), device_ordinal, s_ctrl));
+  CUDA_RT_CHECK(cudaMemPrefetchAsync(B, static_cast<size_t>(N) * sizeof(float), device_ordinal, s_ctrl));
+  CUDA_RT_CHECK(cudaMemPrefetchAsync(C_add, static_cast<size_t>(N) * sizeof(float), device_ordinal, s_ctrl));
   CUDA_RT_CHECK(cudaStreamSynchronize(s_ctrl));
 
   // Wait completion of batch1
@@ -203,8 +203,8 @@ int main() {
     q.tasks[(batch1 + t) % q.capacity] = tk;
   }
   *q.tail = batch1 + batch2;
-  CUDA_RT_CHECK(cudaMemPrefetchAsync(C_mul, (size_t)N * sizeof(float), dev, s_ctrl));
-  CUDA_RT_CHECK(cudaMemPrefetchAsync(q.tail, sizeof(int), dev, s_ctrl));
+  CUDA_RT_CHECK(cudaMemPrefetchAsync(C_mul, static_cast<size_t>(N) * sizeof(float), device_ordinal, s_ctrl));
+  CUDA_RT_CHECK(cudaMemPrefetchAsync(q.tail, sizeof(int), device_ordinal, s_ctrl));
   CUDA_RT_CHECK(cudaStreamSynchronize(s_ctrl));
 
   // Wait all complete

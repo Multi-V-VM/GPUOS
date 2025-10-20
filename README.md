@@ -78,6 +78,7 @@ with torch.no_grad():
 Demo:
 - `python examples/pytorch_scheduler_demo.py` (builds the extension on the fly and runs a quick correctness check).
 - `python examples/pytorch_scheduler_advanced_demo.py` (broadcast, non-contiguous views, mixed dtypes like fp16+fp32).
+- `python examples/pytorch_reduce_demo.py` (single-dimension sum/mean over last dim, keepdim/nostack; non-contiguous input).
 
 Behavior and constraints:
 - Intercepts many unary/binary elementwise ops (relu/sigmoid/tanh/exp/log/sqrt/abs/sin/cos/gelu/hardsigmoid/hardswish/maximum/minimum/pow/leaky_relu/hardtanh/elu/softplus/clamp variants) in addition to add/mul/div/sub.
@@ -85,6 +86,9 @@ Behavior and constraints:
 - Falls back to regular PyTorch for unsupported ops, large tensors (beyond `size_threshold`), or when autograd is enabled (best used under `torch.no_grad()`).
 - Ensures correctness by auto-flushing synchronously if a downstream op consumes a tensor produced by the scheduler before the batch is flushed.
 - Background timer (`auto_flush_ms`) opportunistically flushes pending work to keep latency bounded.
+
+Reductions (beta):
+- Scheduler intercepts `aten::sum.dim_IntList` and `aten::mean.dim` for a single dimension equal to the last axis. Generates and caches a dedicated JIT reduce kernel (sum/mean), supports keepdim and non-contiguous inputs. More general multi-d reductions can be added similarly.
 
 ## Notes
 - The queue is implemented with Unified Memory for simplicity. For production, prefer explicit device memory plus lightweight doorbells (atomics in mapped pinned memory) to avoid UM migration overhead.

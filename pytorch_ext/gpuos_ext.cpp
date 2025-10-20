@@ -159,7 +159,7 @@ static std::string build_batch_op_src() {
     enum DType { kF32=0, kF16=1, kBF16=2, kI32=3, kF64=4 };
     const int MAX_NDIM = 8;
     struct TensorRef { void* data; int dtype; int ndim; long long sizes[MAX_NDIM]; long long strides[MAX_NDIM]; };
-    struct Task { int op; int flags; int ndim; long long numel; TensorRef in0; TensorRef in1; TensorRef out0; };
+    struct Task { int op; int flags; int ndim; long long numel; int rrank; int r_axes[MAX_NDIM]; int r_keepdim; TensorRef in0; TensorRef in1; TensorRef out0; };
 
     __device__ inline int64_t linear_to_offset(const TensorRef& tr, int64_t idx) {
       int64_t off = 0; int nd = tr.ndim; for (int d = nd - 1; d >= 0; --d) { long long dim = tr.sizes[d] > 0 ? tr.sizes[d] : 1; long long i = idx % dim; idx /= dim; off += i * tr.strides[d]; } return off;
@@ -345,7 +345,7 @@ static std::string build_elementwise_src(const std::string& expr, int arity) {
     enum DType { kF32=0, kF16=1, kBF16=2, kI32=3, kF64=4 };
     const int MAX_NDIM = 8;
     struct TensorRef { void* data; int dtype; int ndim; long long sizes[MAX_NDIM]; long long strides[MAX_NDIM]; };
-    struct Task { int op; int flags; int ndim; long long numel; TensorRef in0; TensorRef in1; TensorRef out0; };
+    struct Task { int op; int flags; int ndim; long long numel; int rrank; int r_axes[MAX_NDIM]; int r_keepdim; TensorRef in0; TensorRef in1; TensorRef out0; };
     __device__ inline long long linear_to_offset(const TensorRef& tr, long long idx) {
       long long off = 0; int nd = tr.ndim; for (int d = nd - 1; d >= 0; --d) { long long dim = tr.sizes[d] > 0 ? tr.sizes[d] : 1; long long i = idx % dim; idx /= dim; off += i * tr.strides[d]; } return off;
     }
@@ -405,22 +405,163 @@ static int ensure_elementwise_registered(const std::string& key, const std::stri
 // Submitters for generic elementwise ops
 void submit_unary(int slot, torch::Tensor a, torch::Tensor out) {
   TORCH_CHECK(g_started, "gpuos not initialized");
-  TORCH_CHECK(a.is_cuda() && out.is_cuda(), "tensors must be CUDA");
-  TORCH_CHECK(a.is_contiguous() && out.is_contiguous(), "tensors must be contiguous");
-  TORCH_CHECK(a.dtype() == torch::kFloat32 && out.dtype() == torch::kFloat32, "dtype must be float32");
-  TORCH_CHECK(a.numel() == out.numel(), "size mismatch");
-  Task t{}; t.op = slot; t.n = (int)a.numel(); t.in0 = a.data_ptr(); t.in1 = nullptr; t.out0 = out.data_ptr();
+  Task t{}; build_unary_task(t, slot, a, out);
   std::lock_guard<std::mutex> lock(g_mu);
   int tail = *g_q.tail; g_q.tasks[tail % g_q.capacity] = t; *g_q.tail = tail + 1;
 }
 
 void submit_binary(int slot, torch::Tensor a, torch::Tensor b, torch::Tensor out) {
   TORCH_CHECK(g_started, "gpuos not initialized");
-  TORCH_CHECK(a.is_cuda() && b.is_cuda() && out.is_cuda(), "tensors must be CUDA");
-  TORCH_CHECK(a.is_contiguous() && b.is_contiguous() && out.is_contiguous(), "tensors must be contiguous");
-  TORCH_CHECK(a.dtype() == torch::kFloat32 && b.dtype() == torch::kFloat32 && out.dtype() == torch::kFloat32, "dtype must be float32");
-  TORCH_CHECK(a.numel() == b.numel() && a.numel() == out.numel(), "size mismatch");
-  Task t{}; t.op = slot; t.n = (int)a.numel(); t.in0 = a.data_ptr(); t.in1 = b.data_ptr(); t.out0 = out.data_ptr();
+  Task t{}; build_binary_task(t, slot, a, b, out);
+  std::lock_guard<std::mutex> lock(g_mu);
+  int tail = *g_q.tail; g_q.tasks[tail % g_q.capacity] = t; *g_q.tail = tail + 1;
+}
+
+// -------- Reduction (sum/mean) along a single axis (rrank==1) --------
+static std::string build_reduce_src(const std::string& op_name) {
+  std::string src;
+  src += R"(
+  #include <cuda_fp16.h>
+  #include <cuda_bf16.h>
+  #include <math.h>
+  extern "C" {
+    enum DType { kF32=0, kF16=1, kBF16=2, kI32=3, kF64=4 };
+    const int MAX_NDIM = 8;
+    struct TensorRef { void* data; int dtype; int ndim; long long sizes[MAX_NDIM]; long long strides[MAX_NDIM]; };
+    struct Task { int op; int flags; int ndim; long long numel; int rrank; int r_axes[MAX_NDIM]; int r_keepdim; TensorRef in0; TensorRef in1; TensorRef out0; };
+    __device__ inline float ld_as_float(const TensorRef& tr, long long off) {
+      char* base=(char*)tr.data; switch(tr.dtype){ case kF32: return ((float*)base)[off]; case kF16: return __half2float(((const __half*)base)[off]); case kBF16: return __bfloat162float(((const __nv_bfloat16*)base)[off]); default: return ((float*)base)[off]; }
+    }
+    __device__ inline void st_from_float(const TensorRef& tr, long long off, float v) {
+      char* base=(char*)tr.data; switch(tr.dtype){ case kF32: ((float*)base)[off]=v; break; case kF16: ((__half*)base)[off]=__float2half_rn(v); break; case kBF16: ((__nv_bfloat16*)base)[off]=__float2bfloat16(v); break; default: ((float*)base)[off]=v; break; }
+    }
+    __device__ void op_reduce(const Task& t) {
+      const int in_nd = t.in0.ndim;
+      const int out_nd = t.out0.ndim;
+      const int rrank = t.rrank;
+      // Fast path: single-axis reduce over last dim with contiguous stride
+      if (rrank == 1) {
+        int axis = t.r_axes[0];
+        long long red_N = t.in0.sizes[axis] > 0 ? t.in0.sizes[axis] : 1;
+        if (axis == in_nd - 1 && t.in0.strides[axis] == 1) {
+          // Iterate outputs (all dims except last), each reduced by the whole block
+          long long outer = t.numel; // out elements count
+          for (long long li = 0; li < outer; ++li) {
+            // Decode out coords
+            long long coord_out[MAX_NDIM]; long long tmp = li;
+            for (int d = out_nd - 1; d >= 0; --d) { long long dim = t.out0.sizes[d] > 0 ? t.out0.sizes[d] : 1; coord_out[d] = tmp % dim; tmp /= dim; }
+            // Map to input base offset (excluding last dim)
+            long long off_in_base = 0; int out_ptr = 0;
+            for (int d_in = 0; d_in < in_nd; ++d_in) {
+              if (d_in == axis) continue;
+              long long idx = coord_out[out_ptr++]; off_in_base += idx * t.in0.strides[d_in];
+            }
+            // Parallel accumulate over last dim
+            float acc = 0.0f;
+            for (long long r = threadIdx.x; r < red_N; r += blockDim.x) {
+              long long off_in = off_in_base + r; // stride 1 along last dim
+              acc += ld_as_float(t.in0, off_in);
+            }
+            __shared__ float shm[1024]; // assumes blockDim.x <= 1024
+            int tid = threadIdx.x;
+            shm[tid] = acc;
+            __syncthreads();
+            for (int step = blockDim.x >> 1; step > 0; step >>= 1) {
+              if (tid < step) shm[tid] += shm[tid + step];
+              __syncthreads();
+            }
+            if (tid == 0) {
+              float outv = shm[0];
+  )";
+  if (op_name == "mean") {
+    src += "              outv = outv / (float)red_N;\n";
+  }
+  src += R"(
+              // Output offset
+              long long off_out = 0; for (int d = 0; d < out_nd; ++d) off_out += coord_out[d] * t.out0.strides[d];
+              st_from_float(t.out0, off_out, outv);
+            }
+            __syncthreads();
+          }
+          return;
+        }
+      }
+      // Compute product of reduced sizes
+      long long red_N = 1;
+      for (int j = 0; j < rrank; ++j) {
+        int ax = t.r_axes[j]; long long dim = t.in0.sizes[ax] > 0 ? t.in0.sizes[ax] : 1; red_N *= dim;
+      }
+      for (long long li = threadIdx.x; li < t.numel; li += blockDim.x) {
+        long long coord_out[MAX_NDIM]; long long tmp = li;
+        for (int d = out_nd - 1; d >= 0; --d) { long long dim = t.out0.sizes[d] > 0 ? t.out0.sizes[d] : 1; coord_out[d] = tmp % dim; tmp /= dim; }
+        // Map output coords to input base offset, skipping reduced axes when keepdim==0
+        long long off_in_base = 0; int out_ptr = 0;
+        for (int d_in = 0; d_in < in_nd; ++d_in) {
+          bool is_reduced = false; for (int j = 0; j < rrank; ++j) if (t.r_axes[j] == d_in) { is_reduced = true; break; }
+          if (is_reduced) { if (t.r_keepdim) { /*coord_out[out_ptr] should be 0*/ out_ptr++; } continue; }
+          long long idx = coord_out[out_ptr++]; off_in_base += idx * t.in0.strides[d_in];
+        }
+        long long off_out = 0; for (int d = 0; d < out_nd; ++d) off_out += coord_out[d] * t.out0.strides[d];
+        float acc = 0.0f;
+        for (long long rv = 0; rv < red_N; ++rv) {
+          long long ttmp = rv; long long off_add = 0;
+          for (int j = 0; j < rrank; ++j) { int ax = t.r_axes[j]; long long dim = t.in0.sizes[ax] > 0 ? t.in0.sizes[ax] : 1; long long idx = ttmp % dim; ttmp /= dim; off_add += idx * t.in0.strides[ax]; }
+          long long off_in = off_in_base + off_add; acc += ld_as_float(t.in0, off_in);
+        }
+  )";
+  if (op_name == "mean") {
+    src += "        acc = acc / (float)red_N;\n";
+  }
+  src += R"(
+        st_from_float(t.out0, off_out, acc);
+      }
+    }
+    __device__ void* op_reduce_ptr = (void*)op_reduce;
+  }
+  )";
+  return src;
+}
+
+static int ensure_reduce_registered(const std::string& key, const std::string& op_name) {
+  std::lock_guard<std::mutex> lock(g_reg_mu);
+  auto it = g_op_slots.find(key);
+  if (it != g_op_slots.end()) return it->second;
+  auto ptx = nvrtc_compile_ptx(build_reduce_src(op_name));
+  OpPtrInt addr = load_ptr_from_ptx(ptx, "op_reduce_ptr");
+  int slot = g_next_slot++;
+  set_table_slot_async(slot, addr);
+  CUDA_RT_CHECK(cudaStreamSynchronize(g_ctrl_stream));
+  g_op_slots.emplace(key, slot);
+  return slot;
+}
+
+static void build_reduce_task(Task& t, int op, const torch::Tensor& x, const torch::Tensor& out, const std::vector<int>& axes, bool keepdim) {
+  TORCH_CHECK(x.device().is_cuda() && out.device().is_cuda(), "tensors must be CUDA");
+  TORCH_CHECK(x.device() == out.device(), "device mismatch");
+  int in_nd = (int)x.dim();
+  std::vector<int64_t> out_sizes(out.sizes().begin(), out.sizes().end());
+  int out_nd = (int)out_sizes.size();
+  t.op = op; t.flags = 0; t.ndim = out_nd; t.numel = out.numel();
+  t.rrank = (int)axes.size(); t.r_keepdim = keepdim ? 1 : 0;
+  for (int i = 0; i < t.rrank && i < MAX_NDIM; ++i) t.r_axes[i] = axes[i];
+  // in0: original shape/strides
+  t.in0.data = (void*)x.data_ptr(); t.in0.dtype = dtype_code(x); t.in0.ndim = in_nd;
+  for (int i = 0; i < in_nd; ++i) { t.in0.sizes[i] = x.size(i); t.in0.strides[i] = x.stride(i); }
+  // out0: contiguous
+  t.out0.data = (void*)out.data_ptr(); t.out0.dtype = dtype_code(out); t.out0.ndim = out_nd;
+  for (int i = 0; i < out_nd; ++i) { t.out0.sizes[i] = out_sizes[i]; }
+  int64_t stride = 1; for (int d = out_nd - 1; d >= 0; --d) { t.out0.strides[d] = stride; stride *= out_sizes[d]; }
+  // in1 unused
+  t.in1.data = nullptr; t.in1.ndim = out_nd; for (int i = 0; i < out_nd; ++i) { t.in1.sizes[i] = 1; t.in1.strides[i] = 0; }
+}
+
+int register_reduce(const std::string& key, const std::string& op_name) {
+  return ensure_reduce_registered(key, op_name);
+}
+
+void submit_reduce(int slot, torch::Tensor x, torch::Tensor out, std::vector<int> axes, bool keepdim) {
+  TORCH_CHECK(g_started, "gpuos not initialized");
+  Task t{}; build_reduce_task(t, slot, x, out, axes, keepdim);
   std::lock_guard<std::mutex> lock(g_mu);
   int tail = *g_q.tail; g_q.tasks[tail % g_q.capacity] = t; *g_q.tail = tail + 1;
 }
@@ -436,6 +577,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     }, "Register JIT elementwise op and return slot");
   m.def("submit_unary", &submit_unary, "Submit unary op for a slot");
   m.def("submit_binary", &submit_binary, "Submit binary op for a slot");
+  m.def("register_reduce", &register_reduce, "Register reduce op (sum/mean) and return slot");
+  m.def("submit_reduce", &submit_reduce, "Submit reduce task (axes, keepdim)");
 }
 
 } // namespace gpuos_ext

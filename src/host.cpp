@@ -53,19 +53,40 @@ static const char* cu_errstr(CUresult r) {
 // Build JIT operator source (op_mul) with a pointer-bridge symbol
 static std::string build_operator_source_mul() {
   static const char* src = R"(
+  #include <cuda_fp16.h>
+  #include <cuda_bf16.h>
+  #include <math.h>
   extern "C" {
-    struct Task { int op; int n; void* in0; void* in1; void* out0; };
-    typedef void(*OpFn)(const Task&);
+    enum DType { kF32=0, kF16=1, kBF16=2, kI32=3, kF64=4 };
+    const int MAX_NDIM = 8;
+    struct TensorRef { void* data; int dtype; int ndim; long long sizes[MAX_NDIM]; long long strides[MAX_NDIM]; };
+    struct Task { int op; int flags; int ndim; long long numel; int rrank; int r_axes[MAX_NDIM]; int r_keepdim; TensorRef in0; TensorRef in1; TensorRef out0; };
+    __device__ inline long long linear_to_offset(const TensorRef& tr, long long idx) {
+      long long off = 0; int nd = tr.ndim; for (int d = nd - 1; d >= 0; --d) { long long dim = tr.sizes[d] > 0 ? tr.sizes[d] : 1; long long i = idx % dim; idx /= dim; off += i * tr.strides[d]; } return off; }
+    __device__ inline float ld_as_float(const TensorRef& tr, long long off_elems) {
+      char* base = (char*)tr.data; switch (tr.dtype) {
+        case kF32: return ((float*)base)[off_elems];
+        case kF16: return __half2float(((const __half*)base)[off_elems]);
+        case kBF16: return __bfloat162float(((const __nv_bfloat16*)base)[off_elems]);
+        default: return ((float*)base)[off_elems]; } }
+    __device__ inline void st_from_float(const TensorRef& tr, long long off_elems, float v) {
+      char* base = (char*)tr.data; switch (tr.dtype) {
+        case kF32: ((float*)base)[off_elems] = v; break;
+        case kF16: ((__half*)base)[off_elems] = __float2half_rn(v); break;
+        case kBF16: ((__nv_bfloat16*)base)[off_elems] = __float2bfloat16(v); break;
+        default: ((float*)base)[off_elems] = v; break; } }
     __device__ void op_mul(const Task& t) {
-      const float* a = (const float*)t.in0;
-      const float* b = (const float*)t.in1;
-      float* c = (float*)t.out0;
-      int n = t.n;
-      for (int i = threadIdx.x; i < n; i += blockDim.x) {
-        c[i] = a[i] * b[i];
+      long long N = t.numel;
+      for (long long li = threadIdx.x; li < N; li += blockDim.x) {
+        long long oa = linear_to_offset(t.in0, li);
+        long long ob = linear_to_offset(t.in1, li);
+        long long oc = linear_to_offset(t.out0, li);
+        float A = ld_as_float(t.in0, oa);
+        float B = ld_as_float(t.in1, ob);
+        float R = A * B;
+        st_from_float(t.out0, oc, R);
       }
     }
-    // Bridge variable to expose the device function pointer value
     __device__ void* op_mul_ptr = (void*)op_mul;
   }
   )";

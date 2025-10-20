@@ -17,6 +17,7 @@ class _GPUOSSchedulerMode(torch.utils._python_dispatch.TorchDispatchMode):
         self.size_threshold = size_threshold
         self.auto_flush_ms = auto_flush_ms
         self.pending = pending  # set of storage data_ptr ints for pending outputs
+        self.fused = {}  # data_ptr(int) -> node dict: {'arity','expr','a','b','shape','dtype'}
         self._stop = False
         self._bg: Optional[threading.Thread] = None
         if auto_flush_ms and auto_flush_ms > 0:
@@ -33,13 +34,26 @@ class _GPUOSSchedulerMode(torch.utils._python_dispatch.TorchDispatchMode):
         while not self._stop:
             time.sleep(self.auto_flush_ms / 1000.0)
             try:
+                # Flush fused nodes first
+                self.flush_fused()
                 if gpuos_ext is not None:
                     gpuos_ext.flush(sync=False)
             except Exception:
                 pass
 
-    def _maybe_flush_on_dependency(self, args, kwargs):
+    def _maybe_flush_on_dependency(self, func, args, kwargs):
         # If any arg is a Tensor that corresponds to a pending output, flush synchronously
+        # Skip for ops we intend to fuse
+        fusible = {
+            'aten::add.Tensor', 'aten::sub.Tensor', 'aten::mul.Tensor', 'aten::div.Tensor',
+            'aten::maximum', 'aten::minimum', 'aten::pow.Tensor_Tensor',
+            'aten::relu', 'aten::sigmoid', 'aten::tanh', 'aten::exp', 'aten::log', 'aten::sqrt', 'aten::abs',
+            'aten::hardsigmoid', 'aten::hardswish', 'aten::gelu', 'aten::sin', 'aten::cos',
+            'aten::leaky_relu', 'aten::hardtanh', 'aten::elu', 'aten::softplus', 'aten::clamp', 'aten::clamp_min', 'aten::clamp_max',
+            'aten::sum.dim_IntList', 'aten::mean.dim',
+        }
+        if func.name() in fusible:
+            return
         def _check_tensor(x: Any) -> bool:
             if not isinstance(x, torch.Tensor):
                 return False
@@ -62,23 +76,21 @@ class _GPUOSSchedulerMode(torch.utils._python_dispatch.TorchDispatchMode):
 
         if _walk(args) or _walk(kwargs or {}):
             if gpuos_ext is not None:
+                self.flush_fused()
                 gpuos_ext.flush(sync=True)
             # clear all pending markers; conservative
             self.pending.clear()
+            self.fused.clear()
 
     def _try_schedule_binary(self, func, a: torch.Tensor, b: torch.Tensor, *, alpha=None, out: Optional[torch.Tensor] = None):
-        # Supported: float32 CUDA contiguous, same shape, no grad
+        # Fusion-first path for binary elementwise
         if torch.is_grad_enabled():
             return None
         if not (isinstance(a, torch.Tensor) and isinstance(b, torch.Tensor)):
             return None
         if not (a.is_cuda and b.is_cuda):
             return None
-        if a.dtype != torch.float32 or b.dtype != torch.float32:
-            return None
-        if a.numel() != b.numel():
-            return None
-        if a.numel() > self.size_threshold:
+        if a.numel() > self.size_threshold or b.numel() > self.size_threshold:
             return None
 
         # Prepare out
@@ -95,27 +107,25 @@ class _GPUOSSchedulerMode(torch.utils._python_dispatch.TorchDispatchMode):
 
         name = func.name()
         elementwise_map = {
-            'aten::add.Tensor':         ('(A + B)', 2),
-            'aten::sub.Tensor':         ('(A - B)', 2),
-            'aten::mul.Tensor':         ('(A * B)', 2),
-            'aten::div.Tensor':         ('(A / B)', 2),
-            'aten::maximum':            ('(A > B ? A : B)', 2),
-            'aten::minimum':            ('(A < B ? A : B)', 2),
-            'aten::pow.Tensor_Tensor':  ('powf(A, B)', 2),
+            'aten::add.Tensor':         '(A + B)',
+            'aten::sub.Tensor':         '(A - B)',
+            'aten::mul.Tensor':         '(A * B)',
+            'aten::div.Tensor':         '(A / B)',
+            'aten::maximum':            '(A > B ? A : B)',
+            'aten::minimum':            '(A < B ? A : B)',
+            'aten::pow.Tensor_Tensor':  'powf(A, B)',
         }
         if name not in elementwise_map:
             return None
-        expr, arity = elementwise_map[name]
-        key = f"{name}|f32|contig"
-        slot = gpuos_ext.register_elementwise(key, expr, arity)
-        gpuos_ext.submit_binary(slot, a, b, out)
-
+        expr = elementwise_map[name]
+        node = {'arity': 2, 'expr': expr, 'a': a, 'b': b, 'shape': tuple(out.shape), 'dtype': out.dtype}
+        self.fused[out.data_ptr()] = node
         self.pending.add(out.data_ptr())
         return out
 
     def __torch_dispatch__(self, func, types, args=(), kwargs=None):
-        # Flush if downstream dependency uses any pending outputs
-        self._maybe_flush_on_dependency(args, kwargs or {})
+        # Flush if downstream dependency uses any pending outputs for non-fusible ops
+        self._maybe_flush_on_dependency(func, args, kwargs or {})
 
         name = func.name()
         if name in (
@@ -155,11 +165,27 @@ class _GPUOSSchedulerMode(torch.utils._python_dispatch.TorchDispatchMode):
                 'aten::cos':    ('cosf(A)', 1),
             }
             expr, arity = u_map[name]
-            key = f"{name}|f32|contig"
-            slot = gpuos_ext.register_elementwise(key, expr, arity)
-            gpuos_ext.submit_unary(slot, x, out)
-            self.pending.add(out.data_ptr())
-            return out
+            # Fuse on top of existing fused node (unary-after-*) if possible
+            base_ptr = None
+            try:
+                base_ptr = x.data_ptr()
+            except Exception:
+                base_ptr = None
+            if base_ptr is not None and base_ptr in self.fused:
+                base = self.fused.pop(base_ptr)
+                # Compose unary(expr(base))
+                new_expr = expr.replace('A', f"({base['expr']})")
+                node = {'arity': base['arity'], 'expr': new_expr, 'a': base['a'], 'b': base.get('b'), 'shape': base['shape'], 'dtype': base['dtype']}
+                out = torch.empty(node['shape'], dtype=node['dtype'], device=x.device)
+                self.fused[out.data_ptr()] = node
+                self.pending.discard(base_ptr)
+                self.pending.add(out.data_ptr())
+                return out
+            else:
+                node = {'arity': 1, 'expr': expr, 'a': x, 'b': None, 'shape': tuple(out.shape), 'dtype': out.dtype}
+                self.fused[out.data_ptr()] = node
+                self.pending.add(out.data_ptr())
+                return out
 
         elif name in ('aten::leaky_relu', 'aten::hardtanh', 'aten::elu', 'aten::softplus', 'aten::clamp', 'aten::clamp_min', 'aten::clamp_max'):
             x = args[0]
@@ -226,6 +252,53 @@ class _GPUOSSchedulerMode(torch.utils._python_dispatch.TorchDispatchMode):
             self.pending.add(out.data_ptr())
             return out
 
+        # Reductions: multi-dim sum/mean (rrank>=1), generic; we currently reduce synchronous only when dims provided
+        elif name in ('aten::sum.dim_IntList', 'aten::mean.dim'):
+            x = args[0]
+            if torch.is_grad_enabled() or not x.is_cuda or x.numel() > self.size_threshold:
+                return func(*args, **(kwargs or {}))
+            # Extract dim and keepdim
+            dim = None
+            keepdim = bool((kwargs or {}).get('keepdim', False))
+            if 'dim' in (kwargs or {}):
+                dim = (kwargs or {})['dim']
+            elif len(args) > 1:
+                dim = args[1]
+            if dim is None:
+                return func(*args, **(kwargs or {}))
+            # Normalize dims to list of sorted unique positive axes
+            if isinstance(dim, int):
+                dims = [dim]
+            elif isinstance(dim, (list, tuple)):
+                dims = list(dim)
+            else:
+                return func(*args, **(kwargs or {}))
+            nd = x.dim()
+            ndims = []
+            for d in dims:
+                d = int(d)
+                if d < 0:
+                    d += nd
+                if d < 0 or d >= nd:
+                    return func(*args, **(kwargs or {}))
+                ndims.append(d)
+            ndims = sorted(set(ndims))
+            if len(ndims) == 0:
+                return x.clone()  # nothing to reduce
+            # Output shape
+            if keepdim:
+                out_shape = list(x.shape)
+                for d in ndims:
+                    out_shape[d] = 1
+            else:
+                out_shape = [x.shape[i] for i in range(nd) if i not in set(ndims)]
+            out = torch.empty(out_shape, dtype=x.dtype, device=x.device)
+            op_name = 'mean' if name == 'aten::mean.dim' else 'sum'
+            slot = gpuos_ext.register_reduce(f"reduce_{op_name}|axes={ndims}|keep={int(keepdim)}|{str(x.dtype)}", op_name)
+            gpuos_ext.submit_reduce(slot, x, out, ndims, keepdim)
+            self.pending.add(out.data_ptr())
+            return out
+
         # Fallback to default behavior
         return func(*args, **(kwargs or {}))
 
@@ -248,6 +321,10 @@ class GPUOSScheduler:
         return self
 
     def flush(self, sync: bool = False):
+        # Flush fused elementwise nodes
+        if self._mode is not None:
+            self._mode.flush_fused()
+        # Flush extension-side pending batch (if any)
         if gpuos_ext is not None:
             gpuos_ext.flush(sync=sync)
         if sync:
@@ -259,9 +336,34 @@ class GPUOSScheduler:
                 self._mode.close()
                 self._mode.__exit__(exc_type, exc, tb)
         finally:
+            if self._mode is not None:
+                self._mode.flush_fused()
             gpuos_ext.flush(sync=True)
             self._pending.clear()
             gpuos_ext.shutdown()
+
+    # Mode-scoped helpers for flush: perform registration + submit for fused nodes
+    def _register_submit_node(self, node):
+        expr = node['expr']; arity = node['arity']; a = node['a']; b = node.get('b');
+        key = f"fused|{arity}|{expr}"
+        slot = gpuos_ext.register_elementwise(key, expr, arity)
+        out = torch.empty(node['shape'], dtype=node['dtype'], device=a.device)
+        if arity == 1:
+            gpuos_ext.submit_unary(slot, a, out)
+        else:
+            gpuos_ext.submit_binary(slot, a, b, out)
+        return out
+
+    def flush_fused(self):
+        if not self.fused:
+            return
+        items = list(self.fused.items())
+        self.fused.clear()
+        for ptr, node in items:
+            try:
+                self._register_submit_node(node)
+            except Exception:
+                pass
 
 
 @contextlib.contextmanager
