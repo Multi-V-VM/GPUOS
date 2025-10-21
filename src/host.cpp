@@ -89,7 +89,7 @@ static std::string build_operator_source_mul() {
         st_from_float(t.out0, oc, R);
       }
     }
-    __device__ void* op_mul_ptr = (void*)op_mul;
+    __global__ void get_op_mul_ptr(void** out) { *out = (void*)op_mul; }
   }
   )";
   return std::string(src);
@@ -113,6 +113,9 @@ static std::vector<char> nvrtc_compile_to_ptx(const std::string& src) {
     "--relocatable-device-code=true",
     "-rdc=true",
     "--device-as-default-execution-space",
+    "-I/usr/local/cuda/include",
+    "-I/opt/spack/opt/spack/linux-sapphirerapids/cuda-12.9.0-3eylvnf4bglzu4xuvf4iqvqv5fq7bjpt/targets/x86_64-linux/include",
+    "-I/usr/include/"
   };
 
   nvrtcResult res = nvrtcCompileProgram(prog, (int)(sizeof(opts)/sizeof(opts[0])), opts);
@@ -141,7 +144,7 @@ static std::vector<char> nvrtc_compile_to_ptx(const std::string& src) {
   return ptx;
 }
 
-// Load module and extract the device function pointer stored in symbol op_mul_ptr
+// Load module and extract the device function pointer using a helper kernel
 static OpPtrInt load_op_mul_ptr_from_ptx(const std::vector<char>& ptx) {
   CUDA_DRV_CHECK(cuInit(0));
   // Ensure runtime context is created
@@ -157,15 +160,19 @@ static OpPtrInt load_op_mul_ptr_from_ptx(const std::vector<char>& ptx) {
   CUmodule mod = nullptr;
   CUDA_DRV_CHECK(cuModuleLoadDataEx(&mod, ptx.data(), 0, nullptr, nullptr));
 
-  CUdeviceptr d_sym = 0;
-  size_t bytes = 0;
-  CUDA_DRV_CHECK(cuModuleGetGlobal(&d_sym, &bytes, mod, "op_mul_ptr"));
-  if (bytes < sizeof(OpPtrInt)) {
-    fprintf(stderr, "Unexpected op_ptr size: %zu\n", bytes);
-    std::exit(6);
-  }
+  CUfunction kernel = nullptr;
+  CUDA_DRV_CHECK(cuModuleGetFunction(&kernel, mod, "get_op_mul_ptr"));
+
+  void** d_out = nullptr;
+  CUDA_RT_CHECK(cudaMalloc(&d_out, sizeof(void*)));
+
+  void* args[] = { &d_out };
+  CUDA_DRV_CHECK(cuLaunchKernel(kernel, 1,1,1, 1,1,1, 0, nullptr, args, nullptr));
+  CUDA_RT_CHECK(cudaDeviceSynchronize());
+
   OpPtrInt fn_addr = 0;
-  CUDA_DRV_CHECK(cuMemcpyDtoH(&fn_addr, d_sym, sizeof(fn_addr)));
+  CUDA_RT_CHECK(cudaMemcpy(&fn_addr, d_out, sizeof(fn_addr), cudaMemcpyDeviceToHost));
+  CUDA_RT_CHECK(cudaFree(d_out));
 
   // Keep module alive as long as operator is in use. For this demo, we leak it
   // on purpose; in a real system, store CUmodule and unload when replacing.

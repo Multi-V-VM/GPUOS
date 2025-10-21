@@ -75,7 +75,7 @@ static std::string build_op_mul_src() {
       __device__ inline float ld_as_float(const TensorRef& tr, long long off) { char* base=(char*)tr.data; switch(tr.dtype){ case kF32: return ((float*)base)[off]; case kF16: return __half2float(((const __half*)base)[off]); case kBF16: return __bfloat162float(((const __nv_bfloat16*)base)[off]); default: return ((float*)base)[off]; } }
       __device__ inline void st_from_float(const TensorRef& tr, long long off, float v) { char* base=(char*)tr.data; switch(tr.dtype){ case kF32: ((float*)base)[off]=v; break; case kF16: ((__half*)base)[off]=__float2half_rn(v); break; case kBF16: ((__nv_bfloat16*)base)[off]=__float2bfloat16(v); break; default: ((float*)base)[off]=v; break; } }
       __device__ void op_mul(const Task& t) { long long N=t.numel; for(long long li=threadIdx.x; li<N; li+=blockDim.x){ long long oa=linear_to_offset(t.in0,li); long long ob=linear_to_offset(t.in1,li); long long oc=linear_to_offset(t.out0,li); float R = ld_as_float(t.in0,oa) * ld_as_float(t.in1,ob); st_from_float(t.out0,oc,R);} }
-      __device__ void* op_mul_ptr = (void*)op_mul;
+      __device__ void get_op_mul_ptr(void** out) { *out = (void*)op_mul;
     }
   )";
 }
@@ -91,7 +91,8 @@ static std::vector<char> nvrtc_compile_ptx(const std::string& src) {
   NVRTC_CHECK(nvrtcCreateProgram(&prog, src.c_str(), "op.cu", 0, nullptr, nullptr));
   std::string arch = arch_opt();
   const char* opts[] = {
-    arch.c_str(), "--std=c++17", "--relocatable-device-code=true", "-rdc=true", "--device-as-default-execution-space"
+    arch.c_str(), "--std=c++17", "--relocatable-device-code=true", "-rdc=true", "--device-as-default-execution-space"  ,  "-I/opt/spack/opt/spack/linux-sapphirerapids/cuda-12.9.0-3eylvnf4bglzu4xuvf4iqvqv5fq7bjpt/targets/x86_64-linux/include",
+    "-I/usr/include/"
   };
   nvrtcResult res = nvrtcCompileProgram(prog, (int)(sizeof(opts)/sizeof(opts[0])), opts);
   size_t logSize = 0; NVRTC_CHECK(nvrtcGetProgramLogSize(prog, &logSize));

@@ -81,7 +81,7 @@ static std::string build_op_mul_src() {
       __device__ inline float ld_as_float(const TensorRef& tr, long long off) { char* base=(char*)tr.data; switch(tr.dtype){ case kF32: return ((float*)base)[off]; case kF16: return __half2float(((const __half*)base)[off]); case kBF16: return __bfloat162float(((const __nv_bfloat16*)base)[off]); default: return ((float*)base)[off]; } }
       __device__ inline void st_from_float(const TensorRef& tr, long long off, float v) { char* base=(char*)tr.data; switch(tr.dtype){ case kF32: ((float*)base)[off]=v; break; case kF16: ((__half*)base)[off]=__float2half_rn(v); break; case kBF16: ((__nv_bfloat16*)base)[off]=__float2bfloat16(v); break; default: ((float*)base)[off]=v; break; } }
       __device__ void op_mul(const Task& t) { long long N=t.numel; for(long long li=threadIdx.x; li<N; li+=blockDim.x){ long long oa=linear_to_offset(t.in0,li); long long ob=linear_to_offset(t.in1,li); long long oc=linear_to_offset(t.out0,li); float R = ld_as_float(t.in0,oa) * ld_as_float(t.in1,ob); st_from_float(t.out0,oc,R);} }
-      __device__ void* op_mul_ptr = (void*)op_mul;
+      __global__ void get_op_mul_ptr(void** out) { *out = (void*)op_mul; }
     }
   )";
 }
@@ -95,17 +95,21 @@ static std::string arch_opt() {
 static std::vector<char> nvrtc_compile_ptx(const std::string& src) {
   nvrtcProgram prog; NVRTC_CHECK(nvrtcCreateProgram(&prog, src.c_str(), "op.cu", 0, nullptr, nullptr));
   std::string arch = arch_opt();
-  const char* opts[] = { arch.c_str(), "--std=c++17", "--relocatable-device-code=true", "-rdc=true", "--device-as-default-execution-space" };
+  const char* opts[] = { arch.c_str(), "--std=c++17", "--relocatable-device-code=true", "-rdc=true", "--device-as-default-execution-space",     "-I/opt/spack/opt/spack/linux-sapphirerapids/cuda-12.9.0-3eylvnf4bglzu4xuvf4iqvqv5fq7bjpt/targets/x86_64-linux/include",
+    "-I/usr/include/"};
   nvrtcResult res = nvrtcCompileProgram(prog, (int)(sizeof(opts)/sizeof(opts[0])), opts);
   size_t logSize=0; NVRTC_CHECK(nvrtcGetProgramLogSize(prog, &logSize));
-  if (logSize>1){ std::string log(logSize,'\0'); NVRTC_CHECK(nvrtcGetProgramLog(prog, log.data())); if(res!=NVRTC_SUCCESS) fprintf(stderr,"NVRTC log:\n%s\n",log.c_str()); }
+  if (logSize>1){ std::string log(logSize,'\0'); NVRTC_CHECK(nvrtcGetProgramLog(prog, log.data())); if(res!=NVRTC_SUCCESS) fprintf(stderr,"NVRTC compile log:\n%s\n",log.c_str()); }
   if (res != NVRTC_SUCCESS) std::exit(4);
   size_t ptxSize=0; NVRTC_CHECK(nvrtcGetPTXSize(prog, &ptxSize)); std::vector<char> ptx(ptxSize); NVRTC_CHECK(nvrtcGetPTX(prog, ptx.data())); NVRTC_CHECK(nvrtcDestroyProgram(&prog)); return ptx;
 }
 
 static OpPtrInt load_op_mul_ptr(const std::vector<char>& ptx) {
   CUDA_DRV_CHECK(cuInit(0)); CUDA_RT_CHECK(cudaFree(0)); CUcontext ctx=nullptr; CUDA_DRV_CHECK(cuCtxGetCurrent(&ctx)); if(!ctx){fprintf(stderr,"No CUDA ctx\n"); std::exit(5);} CUmodule mod=nullptr; CUDA_DRV_CHECK(cuModuleLoadDataEx(&mod, ptx.data(), 0, nullptr, nullptr));
-  CUdeviceptr sym=0; size_t bytes=0; CUDA_DRV_CHECK(cuModuleGetGlobal(&sym, &bytes, mod, "op_mul_ptr")); if(bytes<sizeof(OpPtrInt)){fprintf(stderr,"bad op_mul_ptr size %zu\n",bytes); std::exit(6);} OpPtrInt addr=0; CUDA_DRV_CHECK(cuMemcpyDtoH(&addr, sym, sizeof(addr))); return addr;
+  CUfunction kernel=nullptr; CUDA_DRV_CHECK(cuModuleGetFunction(&kernel, mod, "get_op_mul_ptr"));
+  void** d_out=nullptr; CUDA_RT_CHECK(cudaMalloc(&d_out, sizeof(void*)));
+  void* args[] = { &d_out }; CUDA_DRV_CHECK(cuLaunchKernel(kernel, 1,1,1, 1,1,1, 0, nullptr, args, nullptr)); CUDA_RT_CHECK(cudaDeviceSynchronize());
+  OpPtrInt addr=0; CUDA_RT_CHECK(cudaMemcpy(&addr, d_out, sizeof(addr), cudaMemcpyDeviceToHost)); CUDA_RT_CHECK(cudaFree(d_out)); return addr;
 }
 
 static void set_table_slot_async(int index, OpPtrInt fn_addr, cudaStream_t s) {
