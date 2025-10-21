@@ -15,9 +15,11 @@
 
 #include "common.h"
 
-// Kernel prototypes defined in persistent_kernel.cu
-extern "C" __global__ void init_builtin_ops();
-extern "C" __global__ void persistent_worker(WorkQueue q);
+// Kernel launch/symbol wrappers defined in persistent_kernel.cu
+extern "C" cudaError_t launch_init_builtin_ops(cudaStream_t stream);
+extern "C" cudaError_t launch_persistent_worker(WorkQueue q, int blocks, int threads, cudaStream_t stream);
+extern "C" cudaError_t gpu_get_processed_count_async(unsigned long long* out, cudaStream_t s);
+extern "C" cudaError_t gpu_set_op_table_async(int index, OpPtrInt fn, cudaStream_t s);
 
 // Error handling helpers
 #define CUDA_RT_CHECK(expr) do { \
@@ -176,13 +178,12 @@ static void update_jump_table_async(int index, OpPtrInt fn_addr, cudaStream_t st
     fprintf(stderr, "Invalid op index %d\n", index);
     std::exit(7);
   }
-  // __managed__ symbol: use symbol copy with offset
-  CUDA_RT_CHECK(cudaMemcpyToSymbolAsync(g_op_table, &fn_addr, sizeof(fn_addr), index * sizeof(OpFn), cudaMemcpyHostToDevice, stream));
+  CUDA_RT_CHECK(gpu_set_op_table_async(index, fn_addr, stream));
 }
 
 static unsigned long long get_processed_count(cudaStream_t stream) {
   unsigned long long c = 0;
-  CUDA_RT_CHECK(cudaMemcpyFromSymbolAsync(&c, g_processed_count, sizeof(c), 0, cudaMemcpyDeviceToHost, stream));
+  CUDA_RT_CHECK(gpu_get_processed_count_async(&c, stream));
   CUDA_RT_CHECK(cudaStreamSynchronize(stream));
   return c;
 }
@@ -218,10 +219,7 @@ int main() {
 
   // Initialize jump table with built-in op_add at slot 0
   {
-    dim3 blk(128);
-    dim3 grd((GPUOS_MAX_OPS + blk.x - 1) / blk.x);
-    init_builtin_ops<<<grd, blk>>>();
-    CUDA_RT_CHECK(cudaGetLastError());
+    CUDA_RT_CHECK(launch_init_builtin_ops(0));
     CUDA_RT_CHECK(cudaDeviceSynchronize());
   }
 
@@ -233,8 +231,7 @@ int main() {
   cudaStream_t s_kernel, s_ctrl;
   CUDA_RT_CHECK(cudaStreamCreateWithFlags(&s_kernel, cudaStreamNonBlocking));
   CUDA_RT_CHECK(cudaStreamCreateWithFlags(&s_ctrl, cudaStreamNonBlocking));
-  persistent_worker<<<blocks, threads, 0, s_kernel>>>(q);
-  CUDA_RT_CHECK(cudaGetLastError());
+  CUDA_RT_CHECK(launch_persistent_worker(q, blocks.x, threads.x, s_kernel));
 
   // JIT-compile op_mul and install into slot 1 (keeping built-in add at 0)
   {
@@ -264,15 +261,7 @@ int main() {
     }
     // Publish tail after writing tasks
     *q.tail = num_tasks;
-    int dev = 0;
-    CUDA_RT_CHECK(cudaGetDevice(&dev));
-    CUDA_RT_CHECK(cudaMemPrefetchAsync(q.tasks, q.capacity * sizeof(Task), dev, s_ctrl));
-    CUDA_RT_CHECK(cudaMemPrefetchAsync(q.head, sizeof(int), dev, s_ctrl));
-    CUDA_RT_CHECK(cudaMemPrefetchAsync(q.tail, sizeof(int), dev, s_ctrl));
-    CUDA_RT_CHECK(cudaMemPrefetchAsync(q.quit, sizeof(int), dev, s_ctrl));
-    CUDA_RT_CHECK(cudaMemPrefetchAsync(A, (size_t)N * sizeof(float), dev, s_ctrl));
-    CUDA_RT_CHECK(cudaMemPrefetchAsync(B, (size_t)N * sizeof(float), dev, s_ctrl));
-    CUDA_RT_CHECK(cudaMemPrefetchAsync(C, (size_t)N * sizeof(float), dev, s_ctrl));
+    // Prefetch optional for portability; skip
     CUDA_RT_CHECK(cudaStreamSynchronize(s_ctrl));
   }
 

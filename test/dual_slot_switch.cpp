@@ -12,10 +12,31 @@
 #include <thread>
 
 #include "../src/common.h"
+#include <vector>
+#include <cuda_runtime_api.h>
 
-// Kernel prototypes (defined in src/persistent_kernel.cu)
-extern "C" __global__ void init_builtin_ops();
-extern "C" __global__ void persistent_worker(WorkQueue q);
+// Portable wrapper for cudaMemPrefetchAsync across CUDA versions
+#if defined(CUDART_VERSION) && (CUDART_VERSION >= 12000)
+static inline cudaError_t gpuos_prefetch_async(void* ptr, size_t bytes, int device, cudaStream_t stream) {
+  cudaMemLocation loc{}; loc.type = cudaMemLocationTypeDevice; loc.id = device;
+  return cudaMemPrefetchAsync(ptr, bytes, loc, 0u, stream);
+}
+#define cudaMemPrefetchAsync(PTR, BYTES, DEV, STREAM) gpuos_prefetch_async((void*)(PTR), (size_t)(BYTES), (int)(DEV), (cudaStream_t)(STREAM))
+#endif
+
+// As a final fallback for environments where cudaMemPrefetchAsync signature
+// differs or is unavailable, turn prefetch into a no-op to unblock builds.
+#ifndef GPUOS_ENABLE_PREFETCH
+#undef cudaMemPrefetchAsync
+#define cudaMemPrefetchAsync(...) (cudaSuccess)
+#endif
+
+// Kernel/symbol wrappers (defined in src/persistent_kernel.cu)
+extern "C" cudaError_t launch_init_builtin_ops(cudaStream_t stream);
+extern "C" cudaError_t launch_persistent_worker(WorkQueue q, int blocks, int threads, cudaStream_t stream);
+extern "C" cudaError_t gpu_get_processed_count_async(unsigned long long* out, cudaStream_t s);
+extern "C" cudaError_t gpu_set_op_table_async(int index, OpPtrInt fn, cudaStream_t s);
+extern "C" cudaError_t gpu_set_alias_async(int logical_id, int physical_slot, cudaStream_t s);
 
 #define CUDA_RT_CHECK(expr) do { \
   cudaError_t _err = (expr); \
@@ -88,15 +109,18 @@ static OpPtrInt load_op_mul_ptr(const std::vector<char>& ptx) {
 }
 
 static void set_table_slot_async(int index, OpPtrInt fn_addr, cudaStream_t s) {
-  CUDA_RT_CHECK(cudaMemcpyToSymbolAsync(g_op_table, &fn_addr, sizeof(fn_addr), index * sizeof(OpFn), cudaMemcpyHostToDevice, s));
+  CUDA_RT_CHECK(gpu_set_op_table_async(index, fn_addr, s));
 }
 
 static void set_alias_async(int logical_id, int physical_slot, cudaStream_t s) {
-  CUDA_RT_CHECK(cudaMemcpyToSymbolAsync(g_op_alias, &physical_slot, sizeof(physical_slot), logical_id * sizeof(int), cudaMemcpyHostToDevice, s));
+  CUDA_RT_CHECK(gpu_set_alias_async(logical_id, physical_slot, s));
 }
 
 static unsigned long long get_done(cudaStream_t s) {
-  unsigned long long c = 0; CUDA_RT_CHECK(cudaMemcpyFromSymbolAsync(&c, g_processed_count, sizeof(c), 0, cudaMemcpyDeviceToHost, s)); CUDA_RT_CHECK(cudaStreamSynchronize(s)); return c;
+  unsigned long long c = 0;
+  CUDA_RT_CHECK(gpu_get_processed_count_async(&c, s));
+  CUDA_RT_CHECK(cudaStreamSynchronize(s));
+  return c;
 }
 
 int main(){
@@ -114,18 +138,18 @@ int main(){
   cudaStream_t s_kernel,s_ctrl; CUDA_RT_CHECK(cudaStreamCreateWithFlags(&s_kernel,cudaStreamNonBlocking)); CUDA_RT_CHECK(cudaStreamCreateWithFlags(&s_ctrl,cudaStreamNonBlocking));
 
   // Init builtin (alias identity, table[0]=add)
-  { dim3 blk(128); dim3 grd((GPUOS_MAX_OPS+blk.x-1)/blk.x); init_builtin_ops<<<grd,blk,0,s_ctrl>>>(); CUDA_RT_CHECK(cudaGetLastError()); CUDA_RT_CHECK(cudaStreamSynchronize(s_ctrl)); }
+  { CUDA_RT_CHECK(launch_init_builtin_ops(s_ctrl)); CUDA_RT_CHECK(cudaStreamSynchronize(s_ctrl)); }
 
   // Launch persistent kernel
-  int sm=0; CUDA_RT_CHECK(cudaDeviceGetAttribute(&sm,cudaDevAttrMultiProcessorCount,0)); persistent_worker<<<sm,128,0,s_kernel>>>(q); CUDA_RT_CHECK(cudaGetLastError());
+  int sm=0; CUDA_RT_CHECK(cudaDeviceGetAttribute(&sm,cudaDevAttrMultiProcessorCount,0)); CUDA_RT_CHECK(launch_persistent_worker(q, sm, 128, s_kernel));
 
-  const int b1=96,b2=96,b3=96; int dev=0; CUDA_RT_CHECK(cudaGetDevice(&dev));
+  const int b1=96,b2=96,b3=96;
 
-  auto prefetch_q = [&](){ CUDA_RT_CHECK(cudaMemPrefetchAsync(q.tasks,q.capacity*sizeof(Task),dev,s_ctrl)); CUDA_RT_CHECK(cudaMemPrefetchAsync(q.head,sizeof(int),dev,s_ctrl)); CUDA_RT_CHECK(cudaMemPrefetchAsync(q.tail,sizeof(int),dev,s_ctrl)); CUDA_RT_CHECK(cudaMemPrefetchAsync(q.quit,sizeof(int),dev,s_ctrl)); };
+  auto prefetch_q = [&](){ /* optional UM prefetch skipped for portability */ };
 
   // Batch1: logical op L=0 routed to slot 0 (add) -> C1
   for(int t=0;t<b1;++t){ Task tk{}; tk.op=0; tk.flags=0; tk.ndim=1; tk.numel=N; tk.in0={A,kF32,1,{N,0,0,0,0,0,0,0},{1,0,0,0,0,0,0,0}}; tk.in1={B,kF32,1,{N,0,0,0,0,0,0,0},{1,0,0,0,0,0,0,0}}; tk.out0={C1,kF32,1,{N,0,0,0,0,0,0,0},{1,0,0,0,0,0,0,0}}; q.tasks[t%q.capacity]=tk; }
-  *q.tail = b1; prefetch_q(); CUDA_RT_CHECK(cudaMemPrefetchAsync(A,(size_t)N*sizeof(float),dev,s_ctrl)); CUDA_RT_CHECK(cudaMemPrefetchAsync(B,(size_t)N*sizeof(float),dev,s_ctrl)); CUDA_RT_CHECK(cudaMemPrefetchAsync(C1,(size_t)N*sizeof(float),dev,s_ctrl)); CUDA_RT_CHECK(cudaStreamSynchronize(s_ctrl)); while(get_done(s_ctrl) < (unsigned long long)b1) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  *q.tail = b1; prefetch_q(); CUDA_RT_CHECK(cudaStreamSynchronize(s_ctrl)); while(get_done(s_ctrl) < (unsigned long long)b1) std::this_thread::sleep_for(std::chrono::milliseconds(5));
 
   // Prepare backup: JIT mul into physical slot 1 (backup)
   { auto ptx = nvrtc_compile_ptx(build_op_mul_src()); OpPtrInt addr = load_op_mul_ptr(ptx); set_table_slot_async(1, addr, s_ctrl); CUDA_RT_CHECK(cudaStreamSynchronize(s_ctrl)); }
@@ -135,14 +159,14 @@ int main(){
 
   // Batch2: logical op 0 now uses mul -> C2
   for(int t=0;t<b2;++t){ Task tk{}; tk.op=0; tk.flags=0; tk.ndim=1; tk.numel=N; tk.in0={A,kF32,1,{N,0,0,0,0,0,0,0},{1,0,0,0,0,0,0,0}}; tk.in1={B,kF32,1,{N,0,0,0,0,0,0,0},{1,0,0,0,0,0,0,0}}; tk.out0={C2,kF32,1,{N,0,0,0,0,0,0,0},{1,0,0,0,0,0,0,0}}; q.tasks[(b1+t)%q.capacity]=tk; }
-  *q.tail = b1 + b2; prefetch_q(); CUDA_RT_CHECK(cudaMemPrefetchAsync(C2,(size_t)N*sizeof(float),dev,s_ctrl)); CUDA_RT_CHECK(cudaMemPrefetchAsync(q.tail,sizeof(int),dev,s_ctrl)); CUDA_RT_CHECK(cudaStreamSynchronize(s_ctrl)); while(get_done(s_ctrl) < (unsigned long long)(b1+b2)) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  *q.tail = b1 + b2; prefetch_q(); CUDA_RT_CHECK(cudaStreamSynchronize(s_ctrl)); while(get_done(s_ctrl) < (unsigned long long)(b1+b2)) std::this_thread::sleep_for(std::chrono::milliseconds(5));
 
   // Rollback: alias logical 0 -> physical 0 (add)
   set_alias_async(/*logical=*/0, /*physical=*/0, s_ctrl); CUDA_RT_CHECK(cudaStreamSynchronize(s_ctrl));
 
   // Batch3: logical op 0 now back to add -> C3
   for(int t=0;t<b3;++t){ Task tk{}; tk.op=0; tk.flags=0; tk.ndim=1; tk.numel=N; tk.in0={A,kF32,1,{N,0,0,0,0,0,0,0},{1,0,0,0,0,0,0,0}}; tk.in1={B,kF32,1,{N,0,0,0,0,0,0,0},{1,0,0,0,0,0,0,0}}; tk.out0={C3,kF32,1,{N,0,0,0,0,0,0,0},{1,0,0,0,0,0,0,0}}; q.tasks[(b1+b2+t)%q.capacity]=tk; }
-  *q.tail = b1 + b2 + b3; prefetch_q(); CUDA_RT_CHECK(cudaMemPrefetchAsync(C3,(size_t)N*sizeof(float),dev,s_ctrl)); CUDA_RT_CHECK(cudaMemPrefetchAsync(q.tail,sizeof(int),dev,s_ctrl)); CUDA_RT_CHECK(cudaStreamSynchronize(s_ctrl)); while(get_done(s_ctrl) < (unsigned long long)(b1+b2+b3)) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  *q.tail = b1 + b2 + b3; prefetch_q(); CUDA_RT_CHECK(cudaStreamSynchronize(s_ctrl)); while(get_done(s_ctrl) < (unsigned long long)(b1+b2+b3)) std::this_thread::sleep_for(std::chrono::milliseconds(5));
 
   // Stop
   int one=1; CUDA_RT_CHECK(cudaMemcpyAsync(q.quit,&one,sizeof(one),cudaMemcpyHostToDevice,s_ctrl)); CUDA_RT_CHECK(cudaStreamSynchronize(s_ctrl)); CUDA_RT_CHECK(cudaDeviceSynchronize());

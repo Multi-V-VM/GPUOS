@@ -318,11 +318,7 @@ void flush(bool sync) {
   int tail = 0;
   // Enqueue into ring buffer (single producer)
   tail = *g_q.tail; g_q.tasks[tail % g_q.capacity] = batch; *g_q.tail = tail + 1;
-  // Prefetch
-  int dev = 0; CUDA_RT_CHECK(cudaGetDevice(&dev));
-  CUDA_RT_CHECK(cudaMemPrefetchAsync(g_q.tasks, g_q.capacity * sizeof(Task), dev, g_ctrl_stream));
-  CUDA_RT_CHECK(cudaMemPrefetchAsync(g_q.tail, sizeof(int), dev, g_ctrl_stream));
-  CUDA_RT_CHECK(cudaMemPrefetchAsync(d_subs, local.size() * sizeof(Task), dev, g_ctrl_stream));
+  // Prefetch optional; skipped for portability across CUDA versions
   CUDA_RT_CHECK(cudaStreamSynchronize(g_ctrl_stream));
   if (sync) {
     unsigned long long before = get_processed_count();

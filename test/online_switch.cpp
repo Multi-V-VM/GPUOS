@@ -1,5 +1,6 @@
 #include <cuda.h>
 #include <cuda_runtime.h>
+#include <cuda_runtime_api.h>
 #include <nvrtc.h>
 
 #include <cassert>
@@ -14,9 +15,11 @@
 
 #include "../src/common.h"
 
-// Kernel prototypes (defined in src/persistent_kernel.cu)
-extern "C" __global__ void init_builtin_ops();
-extern "C" __global__ void persistent_worker(WorkQueue q);
+// Kernel and symbol wrappers (defined in src/persistent_kernel.cu)
+extern "C" cudaError_t launch_init_builtin_ops(cudaStream_t stream);
+extern "C" cudaError_t launch_persistent_worker(WorkQueue q, int blocks, int threads, cudaStream_t stream);
+extern "C" cudaError_t gpu_get_processed_count_async(unsigned long long* out, cudaStream_t s);
+extern "C" cudaError_t gpu_set_op_table_async(int index, OpPtrInt fn, cudaStream_t s);
 
 #define CUDA_RT_CHECK(expr) do { \
   cudaError_t _err = (expr); \
@@ -47,6 +50,15 @@ static const char* cu_errstr(CUresult r) {
     std::exit(3); \
   } \
 } while(0)
+
+// Portable wrapper for cudaMemPrefetchAsync across CUDA versions
+#if defined(CUDART_VERSION) && (CUDART_VERSION >= 12000)
+static inline cudaError_t gpuos_prefetch_async(void* ptr, size_t bytes, int device, cudaStream_t stream) {
+  cudaMemLocation loc{}; loc.type = cudaMemLocationTypeDevice; loc.id = device;
+  return cudaMemPrefetchAsync(ptr, bytes, loc, 0u, stream);
+}
+#define cudaMemPrefetchAsync(PTR, BYTES, DEV, STREAM) gpuos_prefetch_async((void*)(PTR), (size_t)(BYTES), (int)(DEV), (cudaStream_t)(STREAM))
+#endif
 
 // JIT source: op_mul with pointer bridge
 static std::string build_op_mul_src() {
@@ -108,12 +120,12 @@ static OpPtrInt load_op_mul_ptr(const std::vector<char>& ptx) {
 }
 
 static void set_table_slot_async(int index, OpPtrInt fn_addr, cudaStream_t stream) {
-  CUDA_RT_CHECK(cudaMemcpyToSymbolAsync(g_op_table, &fn_addr, sizeof(fn_addr), index * sizeof(OpFn), cudaMemcpyHostToDevice, stream));
+  CUDA_RT_CHECK(gpu_set_op_table_async(index, fn_addr, stream));
 }
 
 static unsigned long long get_done(cudaStream_t s) {
   unsigned long long c = 0;
-  CUDA_RT_CHECK(cudaMemcpyFromSymbolAsync(&c, g_processed_count, sizeof(c), 0, cudaMemcpyDeviceToHost, s));
+  CUDA_RT_CHECK(gpu_get_processed_count_async(&c, s));
   CUDA_RT_CHECK(cudaStreamSynchronize(s));
   return c;
 }
@@ -150,16 +162,13 @@ int main() {
 
   // Initialize builtin ops table
   {
-    dim3 blk(128); dim3 grd((GPUOS_MAX_OPS + blk.x - 1) / blk.x);
-    init_builtin_ops<<<grd, blk, 0, s_ctrl>>>();
-    CUDA_RT_CHECK(cudaGetLastError());
+    CUDA_RT_CHECK(launch_init_builtin_ops(s_ctrl));
     CUDA_RT_CHECK(cudaStreamSynchronize(s_ctrl));
   }
 
   // Launch persistent kernel
   int sm = 0; CUDA_RT_CHECK(cudaDeviceGetAttribute(&sm, cudaDevAttrMultiProcessorCount, 0));
-  persistent_worker<<<sm, 128, 0, s_kernel>>>(q);
-  CUDA_RT_CHECK(cudaGetLastError());
+  CUDA_RT_CHECK(launch_persistent_worker(q, sm, 128, s_kernel));
 
   // Batch 1: op 0 (add) -> C_add
   const int batch1 = 128, batch2 = 128;
@@ -171,14 +180,7 @@ int main() {
     q.tasks[t % q.capacity] = tk;
   }
   *q.tail = batch1;
-  int device_ordinal = 0; CUDA_RT_CHECK(cudaGetDevice(&device_ordinal));
-  CUDA_RT_CHECK(cudaMemPrefetchAsync(q.tasks, static_cast<size_t>(q.capacity) * sizeof(Task), device_ordinal, s_ctrl));
-  CUDA_RT_CHECK(cudaMemPrefetchAsync(q.head, sizeof(int), device_ordinal, s_ctrl));
-  CUDA_RT_CHECK(cudaMemPrefetchAsync(q.tail, sizeof(int), device_ordinal, s_ctrl));
-  CUDA_RT_CHECK(cudaMemPrefetchAsync(q.quit, sizeof(int), device_ordinal, s_ctrl));
-  CUDA_RT_CHECK(cudaMemPrefetchAsync(A, static_cast<size_t>(N) * sizeof(float), device_ordinal, s_ctrl));
-  CUDA_RT_CHECK(cudaMemPrefetchAsync(B, static_cast<size_t>(N) * sizeof(float), device_ordinal, s_ctrl));
-  CUDA_RT_CHECK(cudaMemPrefetchAsync(C_add, static_cast<size_t>(N) * sizeof(float), device_ordinal, s_ctrl));
+  // Prefetch is optional; skip for portability across CUDA versions
   CUDA_RT_CHECK(cudaStreamSynchronize(s_ctrl));
 
   // Wait completion of batch1
@@ -203,8 +205,7 @@ int main() {
     q.tasks[(batch1 + t) % q.capacity] = tk;
   }
   *q.tail = batch1 + batch2;
-  CUDA_RT_CHECK(cudaMemPrefetchAsync(C_mul, static_cast<size_t>(N) * sizeof(float), device_ordinal, s_ctrl));
-  CUDA_RT_CHECK(cudaMemPrefetchAsync(q.tail, sizeof(int), device_ordinal, s_ctrl));
+  // Prefetch optional; skip
   CUDA_RT_CHECK(cudaStreamSynchronize(s_ctrl));
 
   // Wait all complete

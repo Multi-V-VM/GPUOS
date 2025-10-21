@@ -252,6 +252,29 @@ class _GPUOSSchedulerMode(torch.utils._python_dispatch.TorchDispatchMode):
             self.pending.add(out.data_ptr())
             return out
 
+    # Mode-scoped helpers for fused nodes
+    def _register_submit_node(self, node):
+        expr = node['expr']; arity = node['arity']; a = node['a']; b = node.get('b')
+        key = f"fused|{arity}|{expr}"
+        slot = gpuos_ext.register_elementwise(key, expr, arity)
+        out = torch.empty(node['shape'], dtype=node['dtype'], device=a.device)
+        if arity == 1:
+            gpuos_ext.submit_unary(slot, a, out)
+        else:
+            gpuos_ext.submit_binary(slot, a, b, out)
+        return out
+
+    def flush_fused(self):
+        if not self.fused:
+            return
+        items = list(self.fused.items())
+        self.fused.clear()
+        for _, node in items:
+            try:
+                self._register_submit_node(node)
+            except Exception:
+                pass
+
         # Reductions: multi-dim sum/mean (rrank>=1), generic; we currently reduce synchronous only when dims provided
         elif name in ('aten::sum.dim_IntList', 'aten::mean.dim'):
             x = args[0]

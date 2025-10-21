@@ -90,3 +90,29 @@ extern "C" __global__ void persistent_worker(WorkQueue q) {
     __syncthreads();
   }
 }
+
+// Host-callable launchers to avoid <<< >>> in non-CUDA translation units
+extern "C" cudaError_t launch_init_builtin_ops(cudaStream_t stream) {
+  dim3 blk(128);
+  dim3 grd((GPUOS_MAX_OPS + blk.x - 1) / blk.x);
+  init_builtin_ops<<<grd, blk, 0, stream>>>();
+  return cudaGetLastError();
+}
+
+extern "C" cudaError_t launch_persistent_worker(WorkQueue q, int blocks, int threads, cudaStream_t stream) {
+  persistent_worker<<<blocks, threads, 0, stream>>>(q);
+  return cudaGetLastError();
+}
+
+// Device-symbol helpers callable from host C++ TUs
+extern "C" cudaError_t gpu_get_processed_count_async(unsigned long long* out, cudaStream_t s) {
+  return cudaMemcpyFromSymbolAsync(out, g_processed_count, sizeof(*out), 0, cudaMemcpyDeviceToHost, s);
+}
+
+extern "C" cudaError_t gpu_set_op_table_async(int index, OpPtrInt fn, cudaStream_t s) {
+  return cudaMemcpyToSymbolAsync(g_op_table, &fn, sizeof(fn), index * sizeof(OpFn), cudaMemcpyHostToDevice, s);
+}
+
+extern "C" cudaError_t gpu_set_alias_async(int logical_id, int physical_slot, cudaStream_t s) {
+  return cudaMemcpyToSymbolAsync(g_op_alias, &physical_slot, sizeof(physical_slot), logical_id * sizeof(int), cudaMemcpyHostToDevice, s);
+}
