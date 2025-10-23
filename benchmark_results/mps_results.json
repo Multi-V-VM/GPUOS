@@ -1,0 +1,110 @@
+[
+  {
+    "name": "multiprocess_2",
+    "config": "Sequential (No Sharing)",
+    "mean_time_ms": 20.443776607513428,
+    "std_time_ms": 0.0,
+    "min_time_ms": 20.443776607513428,
+    "max_time_ms": 20.443776607513428,
+    "throughput_ops_per_sec": null,
+    "speedup_vs_baseline": null,
+    "gpu_utilization": null,
+    "power_watts": null
+  },
+  {
+    "name": "multiprocess_2",
+    "config": "Concurrent (No MPS)",
+    "mean_time_ms": 1930.9883117675781,
+    "std_time_ms": 0.0,
+    "min_time_ms": 16.58828830718994,
+    "max_time_ms": 16.77881622314453,
+    "throughput_ops_per_sec": null,
+    "speedup_vs_baseline": null,
+    "gpu_utilization": null,
+    "power_watts": null
+  },
+  {
+    "name": "multiprocess_2",
+    "config": "MPS Enabled",
+    "mean_time_ms": 2015.3756141662598,
+    "std_time_ms": 0.0,
+    "min_time_ms": 16.543567657470703,
+    "max_time_ms": 16.65235137939453,
+    "throughput_ops_per_sec": null,
+    "speedup_vs_baseline": null,
+    "gpu_utilization": null,
+    "power_watts": null
+  },
+  {
+    "name": "multiprocess_4",
+    "config": "Sequential (No Sharing)",
+    "mean_time_ms": 30.454496383666992,
+    "std_time_ms": 0.0,
+    "min_time_ms": 30.454496383666992,
+    "max_time_ms": 30.454496383666992,
+    "throughput_ops_per_sec": null,
+    "speedup_vs_baseline": null,
+    "gpu_utilization": null,
+    "power_watts": null
+  },
+  {
+    "name": "multiprocess_4",
+    "config": "Concurrent (No MPS)",
+    "mean_time_ms": 2637.3255252838135,
+    "std_time_ms": 0.0,
+    "min_time_ms": 19.78275179862976,
+    "max_time_ms": 28.853055953979492,
+    "throughput_ops_per_sec": null,
+    "speedup_vs_baseline": null,
+    "gpu_utilization": null,
+    "power_watts": null
+  },
+  {
+    "name": "multiprocess_4",
+    "config": "MPS Enabled",
+    "mean_time_ms": 2540.3571128845215,
+    "std_time_ms": 0.0,
+    "min_time_ms": 15.857623815536499,
+    "max_time_ms": 16.240095138549805,
+    "throughput_ops_per_sec": null,
+    "speedup_vs_baseline": null,
+    "gpu_utilization": null,
+    "power_watts": null
+  },
+  {
+    "name": "multiprocess_8",
+    "config": "Sequential (No Sharing)",
+    "mean_time_ms": 56.156288146972656,
+    "std_time_ms": 0.0,
+    "min_time_ms": 56.156288146972656,
+    "max_time_ms": 56.156288146972656,
+    "throughput_ops_per_sec": null,
+    "speedup_vs_baseline": null,
+    "gpu_utilization": null,
+    "power_watts": null
+  },
+  {
+    "name": "multiprocess_8",
+    "config": "Concurrent (No MPS)",
+    "mean_time_ms": 3654.5276641845703,
+    "std_time_ms": 0.0,
+    "min_time_ms": 24.417676210403442,
+    "max_time_ms": 33.87846374511719,
+    "throughput_ops_per_sec": null,
+    "speedup_vs_baseline": null,
+    "gpu_utilization": null,
+    "power_watts": null
+  },
+  {
+    "name": "multiprocess_8",
+    "config": "MPS Enabled",
+    "mean_time_ms": 3247.576951980591,
+    "std_time_ms": 0.0,
+    "min_time_ms": 20.80262017250061,
+    "max_time_ms": 31.117536544799805,
+    "throughput_ops_per_sec": null,
+    "speedup_vs_baseline": null,
+    "gpu_utilization": null,
+    "power_watts": null
+  }
+]

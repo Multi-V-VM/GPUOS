@@ -19,9 +19,12 @@
 
 #include "../src/common.h"
 
-// Kernel prototypes from persistent kernel unit
-extern "C" __global__ void init_builtin_ops();
-extern "C" __global__ void persistent_worker(WorkQueue q);
+// Wrapper function prototypes from persistent_kernel.cu
+extern "C" cudaError_t launch_init_builtin_ops(cudaStream_t stream);
+extern "C" cudaError_t launch_persistent_worker(WorkQueue q, int blocks, int threads, cudaStream_t stream);
+extern "C" cudaError_t gpu_get_processed_count_async(unsigned long long* out, cudaStream_t s);
+extern "C" cudaError_t gpu_set_op_table_async(int index, OpPtrInt fn, cudaStream_t s);
+extern "C" cudaError_t gpu_set_alias_async(int logical_id, int physical_slot, cudaStream_t s);
 
 #define CUDA_RT_CHECK(expr) do { \
   cudaError_t _err = (expr); \
@@ -73,7 +76,8 @@ static int g_next_slot = 20; // reserve [0] builtin add, [10] batch
 
 static unsigned long long get_processed_count() {
   unsigned long long c = 0;
-  CUDA_RT_CHECK(cudaMemcpyFromSymbol(&c, g_processed_count, sizeof(c), 0, cudaMemcpyDeviceToHost));
+  CUDA_RT_CHECK(gpu_get_processed_count_async(&c, g_ctrl_stream));
+  CUDA_RT_CHECK(cudaStreamSynchronize(g_ctrl_stream));
   return c;
 }
 
@@ -223,7 +227,7 @@ static OpPtrInt load_ptr_from_ptx(const std::vector<char>& ptx, const char* sym_
 }
 
 static void set_table_slot_async(int index, OpPtrInt fn_addr) {
-  CUDA_RT_CHECK(cudaMemcpyToSymbolAsync(g_op_table, &fn_addr, sizeof(fn_addr), index * sizeof(OpFn), cudaMemcpyHostToDevice, g_ctrl_stream));
+  CUDA_RT_CHECK(gpu_set_op_table_async(index, fn_addr, g_ctrl_stream));
 }
 
 static void compile_batch_if_needed() {
@@ -255,16 +259,12 @@ void init(int capacity, int threads_per_block) {
   CUDA_RT_CHECK(cudaStreamCreateWithFlags(&g_kernel_stream, cudaStreamNonBlocking));
   CUDA_RT_CHECK(cudaStreamCreateWithFlags(&g_ctrl_stream, cudaStreamNonBlocking));
   // Init builtins
-  {
-    dim3 blk(128); dim3 grd((GPUOS_MAX_OPS + blk.x - 1) / blk.x);
-    init_builtin_ops<<<grd, blk, 0, g_ctrl_stream>>>();
-    CUDA_RT_CHECK(cudaGetLastError());
-    CUDA_RT_CHECK(cudaStreamSynchronize(g_ctrl_stream));
-  }
+  CUDA_RT_CHECK(launch_init_builtin_ops(g_ctrl_stream));
+  CUDA_RT_CHECK(cudaStreamSynchronize(g_ctrl_stream));
+
   // Launch persistent worker
   int sm = 0; CUDA_RT_CHECK(cudaDeviceGetAttribute(&sm, cudaDevAttrMultiProcessorCount, 0));
-  persistent_worker<<<sm, threads_per_block, 0, g_kernel_stream>>>(g_q);
-  CUDA_RT_CHECK(cudaGetLastError());
+  CUDA_RT_CHECK(launch_persistent_worker(g_q, sm, threads_per_block, g_kernel_stream));
   g_started = true;
 }
 
@@ -562,7 +562,11 @@ void submit_reduce(int slot, torch::Tensor x, torch::Tensor out, std::vector<int
   int tail = *g_q.tail; g_q.tasks[tail % g_q.capacity] = t; *g_q.tail = tail + 1;
 }
 
+} // namespace gpuos_ext
+
+// Pybind11 module must be at global scope
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  using namespace gpuos_ext;
   m.def("init", &init, "Initialize GPUOS persistent runtime", py::arg("capacity")=4096, py::arg("threads_per_block")=256);
   m.def("shutdown", &shutdown, "Shutdown GPUOS runtime");
   m.def("submit_add", &submit_add, "Submit add micro-op");
@@ -576,5 +580,3 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("register_reduce", &register_reduce, "Register reduce op (sum/mean) and return slot");
   m.def("submit_reduce", &submit_reduce, "Submit reduce task (axes, keepdim)");
 }
-
-} // namespace gpuos_ext
