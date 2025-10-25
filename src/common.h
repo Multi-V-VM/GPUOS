@@ -60,7 +60,11 @@ using OpFn = void(*)(const Task&);
 static_assert(sizeof(void*) == sizeof(unsigned long long), "Assumes 64-bit pointers");
 using OpPtrInt = unsigned long long;
 
-// Globals for control (defined in .cu)
-extern __device__ __managed__ OpFn g_op_table[GPUOS_MAX_OPS];
-extern __device__ __managed__ int  g_op_alias[GPUOS_MAX_OPS];
-extern __device__ __managed__ unsigned long long g_processed_count;
+// Globals for control (defined in persistent_kernel.cu)
+// These are only accessible from device code or via wrapper functions
+// Don't declare as extern when building PyTorch extension (no RDC)
+#ifndef BUILDING_PYTORCH_EXTENSION
+// extern __device__ __managed__ OpFn g_op_table[GPUOS_MAX_OPS];
+// extern __device__ __managed__ int  g_op_alias[GPUOS_MAX_OPS];
+// extern __device__ __managed__ unsigned long long g_processed_count;
+#endif

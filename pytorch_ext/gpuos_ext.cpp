@@ -159,6 +159,7 @@ static std::string build_batch_op_src() {
   #include <cuda_fp16.h>
   #include <cuda_bf16.h>
   #include <math.h>
+  #include <stdint.h>
   extern "C" {
     enum DType { kF32=0, kF16=1, kBF16=2, kI32=3, kF64=4 };
     const int MAX_NDIM = 8;
@@ -187,7 +188,7 @@ static std::string build_batch_op_src() {
       }
     }
 
-    __device__ void op_batch(const Task& t) {
+    extern "C" __device__ void op_batch(const Task& t) {
       const Task* req = (const Task*)t.in0.data;
       int m = (int)t.numel; // using numel to carry count of sub-tasks
       for (int k = 0; k < m; ++k) {
@@ -205,7 +206,6 @@ static std::string build_batch_op_src() {
         __syncthreads();
       }
     }
-    __device__ void* op_batch_ptr = (void*)op_batch;
   }
   )";
 }
@@ -213,12 +213,28 @@ static std::string build_batch_op_src() {
 static std::vector<char> nvrtc_compile_ptx(const std::string& src) {
   nvrtcProgram prog; NVRTC_CHECK(nvrtcCreateProgram(&prog, src.c_str(), "batch.cu", 0, nullptr, nullptr));
   std::string arch = arch_opt();
-  const char* opts[] = { arch.c_str(), "--std=c++17", "--relocatable-device-code=true", "-rdc=true", "--device-as-default-execution-space" };
+  const char* opts[] = {
+    arch.c_str(),
+    "--std=c++17",
+    "--relocatable-device-code=true",
+    "-rdc=true",
+    "--device-as-default-execution-space",
+    "-I/usr/local/cuda/include","-I/usr/include"
+  };
   nvrtcResult res = nvrtcCompileProgram(prog, (int)(sizeof(opts)/sizeof(opts[0])), opts);
   size_t logSize = 0; NVRTC_CHECK(nvrtcGetProgramLogSize(prog, &logSize));
   if (logSize > 1) { std::string log(logSize, '\0'); NVRTC_CHECK(nvrtcGetProgramLog(prog, log.data())); if (res != NVRTC_SUCCESS) fprintf(stderr, "NVRTC log:\n%s\n", log.c_str()); }
   if (res != NVRTC_SUCCESS) std::exit(4);
   size_t ptxSize = 0; NVRTC_CHECK(nvrtcGetPTXSize(prog, &ptxSize)); std::vector<char> ptx(ptxSize); NVRTC_CHECK(nvrtcGetPTX(prog, ptx.data())); NVRTC_CHECK(nvrtcDestroyProgram(&prog)); return ptx;
+}
+
+static OpPtrInt load_function_ptr_from_ptx(const std::vector<char>& ptx, const char* fn_name) {
+  CUDA_DRV_CHECK(cuInit(0)); CUDA_RT_CHECK(cudaFree(0));
+  CUcontext ctx = nullptr; CUDA_DRV_CHECK(cuCtxGetCurrent(&ctx));
+  if (!ctx) { fprintf(stderr, "No CUDA context\n"); std::exit(5);}
+  CUmodule mod=nullptr; CUDA_DRV_CHECK(cuModuleLoadDataEx(&mod, ptx.data(), 0, nullptr, nullptr));
+  CUfunction fn=nullptr; CUDA_DRV_CHECK(cuModuleGetFunction(&fn, mod, fn_name));
+  return (OpPtrInt)fn;
 }
 
 static OpPtrInt load_ptr_from_ptx(const std::vector<char>& ptx, const char* sym_name) {
@@ -233,7 +249,7 @@ static void set_table_slot_async(int index, OpPtrInt fn_addr) {
 static void compile_batch_if_needed() {
   if (g_batch_compiled) return;
   auto ptx = nvrtc_compile_ptx(build_batch_op_src());
-  OpPtrInt addr = load_ptr_from_ptx(ptx, "op_batch_ptr");
+  OpPtrInt addr = load_function_ptr_from_ptx(ptx, "op_batch");
   set_table_slot_async(kBatchSlot, addr);
   CUDA_RT_CHECK(cudaStreamSynchronize(g_ctrl_stream));
   g_batch_compiled = true;
@@ -361,7 +377,7 @@ static std::string build_elementwise_src(const std::string& expr, int arity) {
         default: ((float*)base)[off_elems] = v; break;
       }
     }
-    __device__ void op_impl(const Task& t) {
+    extern "C" __device__ void op_impl(const Task& t) {
       long long N = t.numel;
       for (long long li = threadIdx.x; li < N; li += blockDim.x) {
         long long oa = linear_to_offset(t.in0, li);
@@ -379,7 +395,6 @@ static std::string build_elementwise_src(const std::string& expr, int arity) {
         st_from_float(t.out0, oc, R);
       }
     }
-    __device__ void* op_impl_ptr = (void*)op_impl;
   }
   )";
   return src;
@@ -390,7 +405,7 @@ static int ensure_elementwise_registered(const std::string& key, const std::stri
   auto it = g_op_slots.find(key);
   if (it != g_op_slots.end()) return it->second;
   auto ptx = nvrtc_compile_ptx(build_elementwise_src(expr, arity));
-  OpPtrInt addr = load_ptr_from_ptx(ptx, "op_impl_ptr");
+  OpPtrInt addr = load_function_ptr_from_ptx(ptx, "op_impl");
   int slot = g_next_slot++;
   set_table_slot_async(slot, addr);
   CUDA_RT_CHECK(cudaStreamSynchronize(g_ctrl_stream));
@@ -431,7 +446,7 @@ static std::string build_reduce_src(const std::string& op_name) {
     __device__ inline void st_from_float(const TensorRef& tr, long long off, float v) {
       char* base=(char*)tr.data; switch(tr.dtype){ case kF32: ((float*)base)[off]=v; break; case kF16: ((__half*)base)[off]=__float2half_rn(v); break; case kBF16: ((__nv_bfloat16*)base)[off]=__float2bfloat16(v); break; default: ((float*)base)[off]=v; break; }
     }
-    __device__ void op_reduce(const Task& t) {
+    extern "C" __device__ void op_reduce(const Task& t) {
       const int in_nd = t.in0.ndim;
       const int out_nd = t.out0.ndim;
       const int rrank = t.rrank;
@@ -512,7 +527,6 @@ static std::string build_reduce_src(const std::string& op_name) {
         st_from_float(t.out0, off_out, acc);
       }
     }
-    __device__ void* op_reduce_ptr = (void*)op_reduce;
   }
   )";
   return src;
@@ -523,7 +537,7 @@ static int ensure_reduce_registered(const std::string& key, const std::string& o
   auto it = g_op_slots.find(key);
   if (it != g_op_slots.end()) return it->second;
   auto ptx = nvrtc_compile_ptx(build_reduce_src(op_name));
-  OpPtrInt addr = load_ptr_from_ptx(ptx, "op_reduce_ptr");
+  OpPtrInt addr = load_function_ptr_from_ptx(ptx, "op_reduce");
   int slot = g_next_slot++;
   set_table_slot_async(slot, addr);
   CUDA_RT_CHECK(cudaStreamSynchronize(g_ctrl_stream));

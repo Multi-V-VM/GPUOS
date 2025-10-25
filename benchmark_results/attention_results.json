@@ -1,0 +1,110 @@
+[
+  {
+    "name": "attention_128_128",
+    "config": "PyTorch Naive",
+    "mean_time_ms": 4.615495125452678,
+    "std_time_ms": 0.04764468025179067,
+    "min_time_ms": 4.562431812286377,
+    "max_time_ms": 4.8178558349609375,
+    "throughput_ops_per_sec": 21666.14789571297,
+    "speedup_vs_baseline": null,
+    "gpu_utilization": null,
+    "power_watts": null
+  },
+  {
+    "name": "attention_128_128",
+    "config": "FlashAttention",
+    "mean_time_ms": 7.515982214609782,
+    "std_time_ms": 0.03367864213362981,
+    "min_time_ms": 7.438271999359131,
+    "max_time_ms": 7.60643196105957,
+    "throughput_ops_per_sec": 13304.98092526312,
+    "speedup_vs_baseline": null,
+    "gpu_utilization": null,
+    "power_watts": null
+  },
+  {
+    "name": "attention_128_128",
+    "config": "GPUOS Scheduled",
+    "mean_time_ms": 21.606043359968396,
+    "std_time_ms": 0.284434915174769,
+    "min_time_ms": 21.11644744873047,
+    "max_time_ms": 22.424320220947266,
+    "throughput_ops_per_sec": 4628.334690158016,
+    "speedup_vs_baseline": null,
+    "gpu_utilization": null,
+    "power_watts": null
+  },
+  {
+    "name": "attention_256_128",
+    "config": "PyTorch Naive",
+    "mean_time_ms": 4.5511169883939955,
+    "std_time_ms": 0.025148675211886795,
+    "min_time_ms": 4.515200138092041,
+    "max_time_ms": 4.639167785644531,
+    "throughput_ops_per_sec": 21972.6278746546,
+    "speedup_vs_baseline": null,
+    "gpu_utilization": null,
+    "power_watts": null
+  },
+  {
+    "name": "attention_256_128",
+    "config": "FlashAttention",
+    "mean_time_ms": 7.279856904347738,
+    "std_time_ms": 0.0285238696102327,
+    "min_time_ms": 7.185184001922607,
+    "max_time_ms": 7.356800079345703,
+    "throughput_ops_per_sec": 13736.533741518622,
+    "speedup_vs_baseline": null,
+    "gpu_utilization": null,
+    "power_watts": null
+  },
+  {
+    "name": "attention_256_128",
+    "config": "GPUOS Scheduled",
+    "mean_time_ms": 21.673734283447267,
+    "std_time_ms": 0.31202969662156277,
+    "min_time_ms": 20.94419288635254,
+    "max_time_ms": 22.342592239379883,
+    "throughput_ops_per_sec": 4613.8795784892645,
+    "speedup_vs_baseline": null,
+    "gpu_utilization": null,
+    "power_watts": null
+  },
+  {
+    "name": "attention_512_128",
+    "config": "PyTorch Naive",
+    "mean_time_ms": 4.542231994205051,
+    "std_time_ms": 0.025078462491752426,
+    "min_time_ms": 4.459904193878174,
+    "max_time_ms": 4.598688125610352,
+    "throughput_ops_per_sec": 22015.608213666615,
+    "speedup_vs_baseline": null,
+    "gpu_utilization": null,
+    "power_watts": null
+  },
+  {
+    "name": "attention_512_128",
+    "config": "FlashAttention",
+    "mean_time_ms": 7.3387152089012995,
+    "std_time_ms": 0.036669867415312425,
+    "min_time_ms": 7.271455764770508,
+    "max_time_ms": 7.507232189178467,
+    "throughput_ops_per_sec": 13626.363355633102,
+    "speedup_vs_baseline": null,
+    "gpu_utilization": null,
+    "power_watts": null
+  },
+  {
+    "name": "attention_512_128",
+    "config": "GPUOS Scheduled",
+    "mean_time_ms": 21.73338058259752,
+    "std_time_ms": 0.9711967790288546,
+    "min_time_ms": 20.964128494262695,
+    "max_time_ms": 26.929216384887695,
+    "throughput_ops_per_sec": 4601.216990608106,
+    "speedup_vs_baseline": null,
+    "gpu_utilization": null,
+    "power_watts": null
+  }
+]

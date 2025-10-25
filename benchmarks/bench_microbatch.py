@@ -21,7 +21,7 @@ try:
 except ImportError:
     print("Building GPUOS extension...")
     import subprocess
-    subprocess.run(['python', 'examples/pytorch_batch_demo.py'], check=True)
+    subprocess.run(['python3', 'examples/pytorch_batch_demo.py'], check=True)
     import pytorch_ext.gpuos_ext as gpuos_ext
 
 

@@ -6,9 +6,13 @@ from typing import Any, Dict, Iterable, Optional, Set, Tuple
 import torch
 
 try:
-    import gpuos_ext  # built extension (see examples for dynamic build)
-except Exception as e:  # pragma: no cover
-    gpuos_ext = None
+    import gpuos_ext  # built extension (top-level module when built in-place)
+except Exception:
+    try:
+        # Also support importing as a package submodule
+        from . import gpuos_ext  # type: ignore
+    except Exception:  # pragma: no cover
+        gpuos_ext = None  # type: ignore
 
 
 class _GPUOSSchedulerMode(torch.utils._python_dispatch.TorchDispatchMode):
@@ -252,29 +256,6 @@ class _GPUOSSchedulerMode(torch.utils._python_dispatch.TorchDispatchMode):
             self.pending.add(out.data_ptr())
             return out
 
-    # Mode-scoped helpers for fused nodes
-    def _register_submit_node(self, node):
-        expr = node['expr']; arity = node['arity']; a = node['a']; b = node.get('b')
-        key = f"fused|{arity}|{expr}"
-        slot = gpuos_ext.register_elementwise(key, expr, arity)
-        out = torch.empty(node['shape'], dtype=node['dtype'], device=a.device)
-        if arity == 1:
-            gpuos_ext.submit_unary(slot, a, out)
-        else:
-            gpuos_ext.submit_binary(slot, a, b, out)
-        return out
-
-    def flush_fused(self):
-        if not self.fused:
-            return
-        items = list(self.fused.items())
-        self.fused.clear()
-        for _, node in items:
-            try:
-                self._register_submit_node(node)
-            except Exception:
-                pass
-
         # Reductions: multi-dim sum/mean (rrank>=1), generic; we currently reduce synchronous only when dims provided
         elif name in ('aten::sum.dim_IntList', 'aten::mean.dim'):
             x = args[0]
@@ -324,6 +305,29 @@ class _GPUOSSchedulerMode(torch.utils._python_dispatch.TorchDispatchMode):
 
         # Fallback to default behavior
         return func(*args, **(kwargs or {}))
+
+    # Mode-scoped helpers for fused nodes
+    def _register_submit_node(self, node):
+        expr = node['expr']; arity = node['arity']; a = node['a']; b = node.get('b')
+        key = f"fused|{arity}|{expr}"
+        slot = gpuos_ext.register_elementwise(key, expr, arity)
+        out = torch.empty(node['shape'], dtype=node['dtype'], device=a.device)
+        if arity == 1:
+            gpuos_ext.submit_unary(slot, a, out)
+        else:
+            gpuos_ext.submit_binary(slot, a, b, out)
+        return out
+
+    def flush_fused(self):
+        if not self.fused:
+            return
+        items = list(self.fused.items())
+        self.fused.clear()
+        for _, node in items:
+            try:
+                self._register_submit_node(node)
+            except Exception:
+                pass
 
 
 class GPUOSScheduler:

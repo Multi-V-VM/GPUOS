@@ -1,0 +1,34 @@
+[
+  {
+    "config": "Tiny tensors",
+    "num_ops": 10000,
+    "tensor_size": 256,
+    "pytorch_mean_ms": 47.08941619873047,
+    "pytorch_std_ms": 0.349214927628169,
+    "per_op_us": 4.7089416198730465
+  },
+  {
+    "config": "Small tensors",
+    "num_ops": 10000,
+    "tensor_size": 1024,
+    "pytorch_mean_ms": 47.00950756072998,
+    "pytorch_std_ms": 0.08383170458261362,
+    "per_op_us": 4.700950756072998
+  },
+  {
+    "config": "Medium tensors",
+    "num_ops": 10000,
+    "tensor_size": 4096,
+    "pytorch_mean_ms": 47.01800224304199,
+    "pytorch_std_ms": 0.08187237871919395,
+    "per_op_us": 4.7018002243042
+  },
+  {
+    "config": "Large tensors",
+    "num_ops": 5000,
+    "tensor_size": 16384,
+    "pytorch_mean_ms": 23.545356769561767,
+    "pytorch_std_ms": 0.05496943611327486,
+    "per_op_us": 4.709071353912353
+  }
+]

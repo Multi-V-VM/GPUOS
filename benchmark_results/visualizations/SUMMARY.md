@@ -1,41 +1,47 @@
 # GPUOS Benchmark Results Summary
 
-Generated: 2025-10-23 17:31:51
+Generated: 2025-10-25 03:56:14
 
-## Mig Simulated Results
+## Attention Results
 
-### mig_simulated
-
-| Configuration | Mean (ms) | Std (ms) | Min (ms) | Max (ms) |
-|---------------|-----------|----------|----------|----------|
-| Full GPU (100%)           |   40.506 |   3.454 |  34.478 |  44.791 |
-| MIG 3g.40gb (~42% SMs)    |  106.147 |   4.482 | 101.857 | 122.377 |
-| MIG 2g.20gb (~28% SMs)    |  172.259 |  26.816 | 146.376 | 233.843 |
-| MIG 1g.10gb (~14% SMs)    |  337.781 |  29.552 | 292.260 | 383.069 |
-
-## Mps Results
-
-### multiprocess_2
+### attention_128_128
 
 | Configuration | Mean (ms) | Std (ms) | Min (ms) | Max (ms) |
 |---------------|-----------|----------|----------|----------|
-| Sequential (No Sharing)   |   20.444 |   0.000 |  20.444 |  20.444 |
-| Concurrent (No MPS)       | 1930.988 |   0.000 |  16.588 |  16.779 |
-| MPS Enabled               | 2015.376 |   0.000 |  16.544 |  16.652 |
+| PyTorch Naive             |    4.615 |   0.048 |   4.562 |   4.818 |
+| FlashAttention            |    7.516 |   0.034 |   7.438 |   7.606 |
+| GPUOS Scheduled           |   21.606 |   0.284 |  21.116 |  22.424 |
 
-### multiprocess_4
+**Speedups vs Baseline:**
 
-| Configuration | Mean (ms) | Std (ms) | Min (ms) | Max (ms) |
-|---------------|-----------|----------|----------|----------|
-| Sequential (No Sharing)   |   30.454 |   0.000 |  30.454 |  30.454 |
-| Concurrent (No MPS)       | 2637.326 |   0.000 |  19.783 |  28.853 |
-| MPS Enabled               | 2540.357 |   0.000 |  15.858 |  16.240 |
+- FlashAttention: **0.61×**
+- GPUOS Scheduled: **0.21×**
 
-### multiprocess_8
+### attention_256_128
 
 | Configuration | Mean (ms) | Std (ms) | Min (ms) | Max (ms) |
 |---------------|-----------|----------|----------|----------|
-| Sequential (No Sharing)   |   56.156 |   0.000 |  56.156 |  56.156 |
-| Concurrent (No MPS)       | 3654.528 |   0.000 |  24.418 |  33.878 |
-| MPS Enabled               | 3247.577 |   0.000 |  20.803 |  31.118 |
+| PyTorch Naive             |    4.551 |   0.025 |   4.515 |   4.639 |
+| FlashAttention            |    7.280 |   0.029 |   7.185 |   7.357 |
+| GPUOS Scheduled           |   21.674 |   0.312 |  20.944 |  22.343 |
+
+**Speedups vs Baseline:**
+
+- FlashAttention: **0.63×**
+- GPUOS Scheduled: **0.21×**
+
+### attention_512_128
+
+| Configuration | Mean (ms) | Std (ms) | Min (ms) | Max (ms) |
+|---------------|-----------|----------|----------|----------|
+| PyTorch Naive             |    4.542 |   0.025 |   4.460 |   4.599 |
+| FlashAttention            |    7.339 |   0.037 |   7.271 |   7.507 |
+| GPUOS Scheduled           |   21.733 |   0.971 |  20.964 |  26.929 |
+
+**Speedups vs Baseline:**
+
+- FlashAttention: **0.62×**
+- GPUOS Scheduled: **0.21×**
+
+## Simple Baseline
 
