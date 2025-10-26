@@ -188,7 +188,7 @@ static std::string build_batch_op_src() {
       }
     }
 
-    extern "C" __device__ void op_batch(const Task& t) {
+    __device__ void op_batch(const Task& t) {
       const Task* req = (const Task*)t.in0.data;
       int m = (int)t.numel; // using numel to carry count of sub-tasks
       for (int k = 0; k < m; ++k) {
@@ -377,7 +377,7 @@ static std::string build_elementwise_src(const std::string& expr, int arity) {
         default: ((float*)base)[off_elems] = v; break;
       }
     }
-    extern "C" __device__ void op_impl(const Task& t) {
+    __device__ void op_impl(const Task& t) {
       long long N = t.numel;
       for (long long li = threadIdx.x; li < N; li += blockDim.x) {
         long long oa = linear_to_offset(t.in0, li);
@@ -446,7 +446,7 @@ static std::string build_reduce_src(const std::string& op_name) {
     __device__ inline void st_from_float(const TensorRef& tr, long long off, float v) {
       char* base=(char*)tr.data; switch(tr.dtype){ case kF32: ((float*)base)[off]=v; break; case kF16: ((__half*)base)[off]=__float2half_rn(v); break; case kBF16: ((__nv_bfloat16*)base)[off]=__float2bfloat16(v); break; default: ((float*)base)[off]=v; break; }
     }
-    extern "C" __device__ void op_reduce(const Task& t) {
+    __device__ void op_reduce(const Task& t) {
       const int in_nd = t.in0.ndim;
       const int out_nd = t.out0.ndim;
       const int rrank = t.rrank;
