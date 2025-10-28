@@ -177,9 +177,17 @@ class MPSController:
             # Stop any existing MPS instance
             MPSController.stop()
 
-            # Start MPS
+            # Ensure pipe and log directories are set and exist
+            pipe_dir = os.environ.get('CUDA_MPS_PIPE_DIRECTORY') or f"/tmp/nvidia-mps-{os.getuid()}"
+            log_dir = os.environ.get('CUDA_MPS_LOG_DIRECTORY') or f"/tmp/nvidia-mps-log-{os.getuid()}"
+            os.makedirs(pipe_dir, exist_ok=True)
+            os.makedirs(log_dir, exist_ok=True)
+            os.environ['CUDA_MPS_PIPE_DIRECTORY'] = pipe_dir
+            os.environ['CUDA_MPS_LOG_DIRECTORY'] = log_dir
+
+            # Start MPS daemon with environment
             subprocess.run(['nvidia-cuda-mps-control', '-d'],
-                         check=True, timeout=5)
+                         check=True, timeout=10, env=os.environ.copy())
             time.sleep(1)  # Give it time to start
             print("MPS server started")
             return True

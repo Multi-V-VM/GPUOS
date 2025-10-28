@@ -1,0 +1,13 @@
+name,config,mean_time_ms,std_time_ms,min_time_ms,max_time_ms,throughput_ops_per_sec,speedup_vs_baseline,gpu_utilization,power_watts
+mixed_ops_1024,PyTorch Baseline,189.343994140625,0.0,189.343994140625,189.343994140625,,,,
+mixed_ops_1024,PyTorch Compiled,3.263999940827489,0.0,3.263999940827489,3.263999940827489,,,,
+mixed_ops_1024,GPUOS Scheduler,8.0,0.0,8.0,8.0,,,,
+mixed_ops_2048,PyTorch Baseline,189.17245483398438,0.0,189.17245483398438,189.17245483398438,,,,
+mixed_ops_2048,PyTorch Compiled,5.216000135987997,0.0,5.216000135987997,5.216000135987997,,,,
+mixed_ops_2048,GPUOS Scheduler,8.0,0.0,8.0,8.0,,,,
+mixed_ops_4096,PyTorch Baseline,189.32281494140625,0.0,189.32281494140625,189.32281494140625,,,,
+mixed_ops_4096,PyTorch Compiled,4.863999783992767,0.0,4.863999783992767,4.863999783992767,,,,
+mixed_ops_4096,GPUOS Scheduler,8.0,0.0,8.0,8.0,,,,
+mixed_ops_8192,PyTorch Baseline,189.47625732421875,0.0,189.47625732421875,189.47625732421875,,,,
+mixed_ops_8192,PyTorch Compiled,5.311999935656786,0.0,5.311999935656786,5.311999935656786,,,,
+mixed_ops_8192,GPUOS Scheduler,8.0,0.0,8.0,8.0,,,,

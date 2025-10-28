@@ -439,9 +439,11 @@ py::dict peek_queue() {
   int tail = read_dev_int(g_q.tail);
   int quit = read_dev_int(g_q.quit);
   unsigned long long proc = get_processed_count();
+  int inflight = tail - head;
+  if (inflight < 0) inflight = 0;
   d["head"] = head;
   d["tail"] = tail;
-  d["in_flight"] = tail - head;
+  d["in_flight"] = inflight;
   d["capacity"] = g_q.capacity;
   d["processed"] = proc;
   d["heartbeat"] = get_heartbeat();
@@ -668,8 +670,9 @@ static std::string build_elementwise_src(const std::string& expr, int arity) {
         st_from_float(t.out0, oc, R);
       }
     }
-    // Export device pointer so host can fetch true device function address
-    __device__ unsigned long long op_impl_ptr = (unsigned long long)&op_impl;
+    // Export device pointer so host can fetch true device function address (typed)
+    typedef void (*OpFnT)(const Task&);
+    __device__ OpFnT op_impl_ptr = op_impl;
   }
   )";
   return src;
@@ -801,7 +804,8 @@ static std::string build_reduce_src(const std::string& op_name) {
         st_from_float(t.out0, off_out, acc);
       }
     }
-    __device__ unsigned long long op_reduce_ptr = (unsigned long long)&op_reduce;
+    typedef void (*OpFnT)(const Task&);
+    __device__ OpFnT op_reduce_ptr = op_reduce;
   }
   )";
   return src;

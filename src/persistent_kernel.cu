@@ -136,24 +136,29 @@ extern "C" __global__ void persistent_worker(WorkQueue q) {
   __shared__ int s_has_work;
   while (atomicAdd(q.quit, 0) == 0) {
     if (threadIdx.x == 0) {
-      int tail = atomicAdd(q.tail, 0);
-      int idx = atomicAdd(q.head, 1);
-      if (idx < tail) {
-        s_task = q.tasks[idx % q.capacity];
-        s_has_work = 1;
-        if (g_debug_level > 0) {
-          printf("[worker] picked idx=%d tail=%d op=%d numel=%lld in0=%p in1=%p out0=%p\n",
-                 idx, tail, s_task.op, (long long)s_task.numel,
-                 s_task.in0.data, s_task.in1.data, s_task.out0.data);
+      s_has_work = 0;
+      // Robust claim: CAS increments head only if work is available
+      for (int attempt = 0; attempt < 1024; ++attempt) {
+        int h = atomicAdd(q.head, 0);
+        int t = atomicAdd(q.tail, 0);
+        if (h >= t) break; // no work
+        if (atomicCAS(q.head, h, h + 1) == h) {
+          s_task = q.tasks[h % q.capacity];
+          s_has_work = 1;
+          if (g_debug_level > 0) {
+            printf("[worker] picked idx=%d tail=%d op=%d numel=%lld in0=%p in1=%p out0=%p\n",
+                   h, t, s_task.op, (long long)s_task.numel,
+                   s_task.in0.data, s_task.in1.data, s_task.out0.data);
+          }
+          break;
         }
-      } else {
-        // no work; revert head increment
-        atomicSub(q.head, 1);
-        s_has_work = 0;
       }
     }
     __syncthreads();
     if (!s_has_work) {
+      if (threadIdx.x == 0 && blockIdx.x == 0) {
+        atomicAdd(&g_heartbeat, 1ULL);
+      }
       __nanosleep(1000);
       continue;
     }
