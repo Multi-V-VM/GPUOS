@@ -480,7 +480,7 @@ def visualize_all_results(result_dir: str = "benchmark_results", extra_csv: Opti
         if microbatch_entries:
             print("Generating micro-batch speedup plot...")
             plot_microbatch_speedup(microbatch_entries,
-                                   os.path.join(viz_dir, 'microbatch_speedup.png'))
+                                   os.path.join(viz_dir, 'microbatch_speedup.pdf'))
         else:
             print("No micro-batch results found in JSON/CSV")
 
@@ -489,7 +489,7 @@ def visualize_all_results(result_dir: str = "benchmark_results", extra_csv: Opti
         if mixed_entries:
             print("Generating mixed ops comparison...")
             plot_mixed_ops_comparison(mixed_entries,
-                                     os.path.join(viz_dir, 'mixed_ops_comparison.png'))
+                                     os.path.join(viz_dir, 'mixed_ops_comparison.pdf'))
         else:
             print("No mixed ops results found in JSON/CSV")
 
@@ -498,7 +498,7 @@ def visualize_all_results(result_dir: str = "benchmark_results", extra_csv: Opti
         if mps_entries:
             print("Generating MPS scaling plot...")
             plot_mps_scaling(mps_entries,
-                            os.path.join(viz_dir, 'mps_scaling.png'))
+                            os.path.join(viz_dir, 'mps_scaling.pdf'))
         else:
             print("No MPS results found in JSON/CSV")
 
@@ -507,7 +507,7 @@ def visualize_all_results(result_dir: str = "benchmark_results", extra_csv: Opti
         if attention_entries:
             print("Generating attention throughput plot...")
             plot_attention_throughput(attention_entries,
-                                     os.path.join(viz_dir, 'attention_throughput.png'))
+                                     os.path.join(viz_dir, 'attention_throughput.pdf'))
         else:
             print("No attention results found in JSON/CSV")
 
@@ -518,12 +518,12 @@ def visualize_all_results(result_dir: str = "benchmark_results", extra_csv: Opti
             real = [e for e in mig_entries if e.get('name') == 'mig_real']
             if simulated:
                 print("Generating MIG simulated plot...")
-                plot_mig_simulated(simulated, os.path.join(viz_dir, 'mig_simulated.png'))
+                plot_mig_simulated(simulated, os.path.join(viz_dir, 'mig_simulated.pdf'))
             else:
                 print("No MIG simulated results found")
             if real:
                 print("Generating MIG real plot...")
-                plot_mig_real(real, os.path.join(viz_dir, 'mig_real.png'))
+                plot_mig_real(real, os.path.join(viz_dir, 'mig_real.pdf'))
             else:
                 print("No real MIG results found")
         else:
@@ -533,13 +533,13 @@ def visualize_all_results(result_dir: str = "benchmark_results", extra_csv: Opti
     print("Generating LaTeX tables...")
     generate_latex_table(results, os.path.join(viz_dir, 'tables.tex'))
 
-    print("Generating summary report...")
-    generate_summary_report(results, os.path.join(viz_dir, 'SUMMARY.md'))
+    # print("Generating summary report...")
+    # generate_summary_report(results, os.path.join(viz_dir, 'SUMMARY.md'))
 
-    print("\n" + "="*80)
-    print("Visualization complete!")
-    print(f"Results saved to: {viz_dir}/")
-    print("="*80)
+    # print("\n" + "="*80)
+    # print("Visualization complete!")
+    # print(f"Results saved to: {viz_dir}/")
+    # print("="*80)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Visualize benchmark results')
