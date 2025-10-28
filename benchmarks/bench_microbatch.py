@@ -3,6 +3,7 @@ Micro-batch elementwise operation benchmarks
 Compares GPUOS vs PyTorch baseline vs MPS vs MIG
 """
 import torch
+import os
 import sys
 import os
 
@@ -14,15 +15,37 @@ from benchmark_utils import (
     verify_correctness, get_gpu_info, MPSController
 )
 
-try:
-    # Build extension on the fly if needed
-    import torch.utils.cpp_extension
-    import pytorch_ext.gpuos_ext as gpuos_ext
-except ImportError:
-    print("Building GPUOS extension...")
-    import subprocess
-    subprocess.run(['python3', 'examples/pytorch_batch_demo.py'], check=True)
-    import pytorch_ext.gpuos_ext as gpuos_ext
+def load_gpuos_ext():
+    try:
+        import pytorch_ext.gpuos_ext as mod
+        if hasattr(mod, 'abi_version') and mod.abi_version() >= 1:
+            return mod
+        else:
+            print("GPUOS extension present but outdated; rebuilding...")
+    except Exception:
+        print("GPUOS extension not found; building...")
+
+    # Build fresh extension in-place
+    from torch.utils.cpp_extension import load
+    import os
+    here = os.path.dirname(os.path.abspath(__file__))
+    root = os.path.dirname(here)
+    mod = load(
+        name='gpuos_ext',
+        sources=[
+            os.path.join(root, 'pytorch_ext', 'gpuos_ext.cpp'),
+            os.path.join(root, 'src', 'persistent_kernel.cu'),
+        ],
+        extra_cflags=['-O3', '-std=c++17'],
+        extra_cuda_cflags=['-O3', '-std=c++17', '--expt-relaxed-constexpr',
+                           '-gencode=arch=compute_121,code=sm_121'],
+        extra_ldflags=['-lcuda', '-lnvrtc', '-lcudart'],
+        with_cuda=True,
+        verbose=False,
+    )
+    return mod
+
+gpuos_ext = load_gpuos_ext()
 
 
 def benchmark_pytorch_baseline(num_ops: int, tensor_size: int) -> tuple:
@@ -49,11 +72,47 @@ def benchmark_gpuos(num_ops: int, tensor_size: int) -> tuple:
 
     # Initialize GPUOS
     gpuos_ext.init(capacity=8192, threads_per_block=256)
+    # Optional: configure device yield policy via env
+    ye = os.getenv('GPUOS_YIELD_EVERY')
+    if ye is not None:
+        try:
+            ye_val = int(ye)
+            if hasattr(gpuos_ext, 'set_yield_every'):
+                gpuos_ext.set_yield_every(ye_val)
+        except Exception:
+            pass
+
+    debug_flush = os.getenv('GPUOS_DEBUG_FLUSH') not in (None, '0', 'false', 'False')
 
     def workload():
         for _ in range(num_ops):
             gpuos_ext.submit_add(a, b, out)
-        gpuos_ext.flush(sync=True)
+        if debug_flush:
+            import time
+            t0 = time.time()
+            gpuos_ext.flush(sync=True)
+            dt = time.time() - t0
+            alive = getattr(gpuos_ext, 'worker_alive', lambda: None)()
+            peek = getattr(gpuos_ext, 'peek_queue', lambda: {})()
+            print(f"  flush returned in {dt:.3f}s; worker_alive={alive}; peek={peek}")
+            return dt, dt, dt, dt, dt
+        else:
+            gpuos_ext.flush(sync=True)
+        # Optional peek to observe queue state per iteration
+        import os
+        try:
+            peek_every = int(os.getenv('GPUOS_PEEK_EVERY', '0'))
+        except Exception:
+            peek_every = 0
+        if peek_every:
+            # Use a counter on the function to print every N calls
+            c = getattr(workload, '_cnt', 0) + 1
+            setattr(workload, '_cnt', c)
+            if c % peek_every == 0:
+                try:
+                    print('  peek:', gpuos_ext.peek_queue())
+                except Exception as _:
+                    pass
 
     timer = BenchmarkTimer(warmup_iters=50, measure_iters=500)
     mean_ms, std_ms, min_ms, max_ms = timer.benchmark(workload)

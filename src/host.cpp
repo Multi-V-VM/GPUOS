@@ -57,7 +57,6 @@ static std::string build_operator_source_mul() {
   static const char* src = R"(
   #include <cuda_fp16.h>
   #include <cuda_bf16.h>
-  #include <math.h>
   extern "C" {
     enum DType { kF32=0, kF16=1, kBF16=2, kI32=3, kF64=4 };
     const int MAX_NDIM = 8;

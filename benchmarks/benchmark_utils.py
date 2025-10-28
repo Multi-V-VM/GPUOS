@@ -2,6 +2,7 @@
 Benchmark utilities for GPUOS, MPS, and MIG comparisons
 """
 import time
+import os
 import torch
 import numpy as np
 from typing import Callable, Dict, List, Optional, Tuple
@@ -34,6 +35,19 @@ class BenchmarkTimer:
 
     def __init__(self, warmup_iters: int = 100, measure_iters: int = 1000,
                  trim_percent: float = 0.05):
+        # Allow environment overrides for faster debugging
+        env_warm = os.getenv('GPUOS_BENCH_WARMUP')
+        env_meas = os.getenv('GPUOS_BENCH_ITERS')
+        if env_warm is not None:
+            try:
+                warmup_iters = int(env_warm)
+            except Exception:
+                pass
+        if env_meas is not None:
+            try:
+                measure_iters = int(env_meas)
+            except Exception:
+                pass
         self.warmup_iters = warmup_iters
         self.measure_iters = measure_iters
         self.trim_percent = trim_percent
@@ -52,7 +66,8 @@ class BenchmarkTimer:
 
         # Measurement
         times = []
-        for _ in range(self.measure_iters):
+        show_prog = os.getenv('GPUOS_BENCH_PROGRESS') is not None
+        for i in range(self.measure_iters):
             start_event = torch.cuda.Event(enable_timing=True)
             end_event = torch.cuda.Event(enable_timing=True)
 
@@ -63,12 +78,16 @@ class BenchmarkTimer:
             torch.cuda.synchronize()
             elapsed = start_event.elapsed_time(end_event)  # milliseconds
             times.append(elapsed)
+            if show_prog and (i % max(1, self.measure_iters // 10) == 0):
+                print(f"  progress: {i}/{self.measure_iters}")
 
-        # Trim outliers
-        times = np.array(times)
-        if self.trim_percent > 0:
+        # Trim outliers (skip when too few samples)
+        times = np.array(times, dtype=float)
+        if self.trim_percent > 0 and len(times) >= 20:
             lower = int(len(times) * self.trim_percent)
             upper = int(len(times) * (1 - self.trim_percent))
+            lower = max(0, min(lower, len(times) - 1))
+            upper = max(lower + 1, min(upper, len(times)))
             times = np.sort(times)[lower:upper]
 
         return (

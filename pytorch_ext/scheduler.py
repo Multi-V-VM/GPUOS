@@ -1,4 +1,5 @@
 import contextlib
+import os
 import threading
 import time
 from typing import Any, Dict, Iterable, Optional, Set, Tuple
@@ -13,6 +14,9 @@ except Exception:
         from . import gpuos_ext  # type: ignore
     except Exception:  # pragma: no cover
         gpuos_ext = None  # type: ignore
+
+
+_DISABLE_JIT = os.environ.get('GPUOS_SCHEDULER_DISABLE_JIT', '1') not in ('0', 'false', 'False')
 
 
 class _GPUOSSchedulerMode(torch.utils._python_dispatch.TorchDispatchMode):
@@ -38,8 +42,9 @@ class _GPUOSSchedulerMode(torch.utils._python_dispatch.TorchDispatchMode):
         while not self._stop:
             time.sleep(self.auto_flush_ms / 1000.0)
             try:
-                # Flush fused nodes first
-                self.flush_fused()
+                # Flush fused nodes first (only if JIT enabled)
+                if not _DISABLE_JIT:
+                    self.flush_fused()
                 if gpuos_ext is not None:
                     gpuos_ext.flush(sync=False)
             except Exception:
@@ -47,15 +52,20 @@ class _GPUOSSchedulerMode(torch.utils._python_dispatch.TorchDispatchMode):
 
     def _maybe_flush_on_dependency(self, func, args, kwargs):
         # If any arg is a Tensor that corresponds to a pending output, flush synchronously
-        # Skip for ops we intend to fuse
-        fusible = {
-            'aten::add.Tensor', 'aten::sub.Tensor', 'aten::mul.Tensor', 'aten::div.Tensor',
-            'aten::maximum', 'aten::minimum', 'aten::pow.Tensor_Tensor',
-            'aten::relu', 'aten::sigmoid', 'aten::tanh', 'aten::exp', 'aten::log', 'aten::sqrt', 'aten::abs',
-            'aten::hardsigmoid', 'aten::hardswish', 'aten::gelu', 'aten::sin', 'aten::cos',
-            'aten::leaky_relu', 'aten::hardtanh', 'aten::elu', 'aten::softplus', 'aten::clamp', 'aten::clamp_min', 'aten::clamp_max',
-            'aten::sum.dim_IntList', 'aten::mean.dim',
-        }
+        # Skip for ops we intend to schedule/fuse
+        if _DISABLE_JIT:
+            fusible = {
+                'aten::add.Tensor', 'aten::sub.Tensor', 'aten::mul.Tensor', 'aten::div.Tensor',
+            }
+        else:
+            fusible = {
+                'aten::add.Tensor', 'aten::sub.Tensor', 'aten::mul.Tensor', 'aten::div.Tensor',
+                'aten::maximum', 'aten::minimum', 'aten::pow.Tensor_Tensor',
+                'aten::relu', 'aten::sigmoid', 'aten::tanh', 'aten::exp', 'aten::log', 'aten::sqrt', 'aten::abs',
+                'aten::hardsigmoid', 'aten::hardswish', 'aten::gelu', 'aten::sin', 'aten::cos',
+                'aten::leaky_relu', 'aten::hardtanh', 'aten::elu', 'aten::softplus', 'aten::clamp', 'aten::clamp_min', 'aten::clamp_max',
+                'aten::sum.dim_IntList', 'aten::mean.dim',
+            }
         if func.name() in fusible:
             return
         def _check_tensor(x: Any) -> bool:
@@ -80,7 +90,8 @@ class _GPUOSSchedulerMode(torch.utils._python_dispatch.TorchDispatchMode):
 
         if _walk(args) or _walk(kwargs or {}):
             if gpuos_ext is not None:
-                self.flush_fused()
+                if not _DISABLE_JIT:
+                    self.flush_fused()
                 gpuos_ext.flush(sync=True)
             # clear all pending markers; conservative
             self.pending.clear()
@@ -110,6 +121,27 @@ class _GPUOSSchedulerMode(torch.utils._python_dispatch.TorchDispatchMode):
                 return None
 
         name = func.name()
+        # If JIT is disabled, only schedule add/mul via built-ins and fallback otherwise
+        if _DISABLE_JIT:
+            if name == 'aten::add.Tensor':
+                gpuos_ext.submit_add(a, b, out)
+                self.pending.add(out.data_ptr())
+                return out
+            elif name == 'aten::mul.Tensor':
+                gpuos_ext.submit_mul(a, b, out)
+                self.pending.add(out.data_ptr())
+                return out
+            elif name == 'aten::sub.Tensor':
+                gpuos_ext.submit_sub(a, b, out)
+                self.pending.add(out.data_ptr())
+                return out
+            elif name == 'aten::div.Tensor':
+                gpuos_ext.submit_div(a, b, out)
+                self.pending.add(out.data_ptr())
+                return out
+            else:
+                return None
+        # JIT-enabled: build fused node
         elementwise_map = {
             'aten::add.Tensor':         '(A + B)',
             'aten::sub.Tensor':         '(A - B)',
@@ -154,6 +186,9 @@ class _GPUOSSchedulerMode(torch.utils._python_dispatch.TorchDispatchMode):
             out = (kwargs or {}).get('out', None)
             if out is None:
                 out = torch.empty_like(x)
+            # Without JIT we do not schedule unary ops; fallback
+            if _DISABLE_JIT:
+                return func(*args, **(kwargs or {}))
             u_map = {
                 'aten::relu':   ('(A > 0.f ? A : 0.f)', 1),
                 'aten::sigmoid':('1.f / (1.f + expf(-A))', 1),
@@ -198,6 +233,8 @@ class _GPUOSSchedulerMode(torch.utils._python_dispatch.TorchDispatchMode):
             out = (kwargs or {}).get('out', None)
             if out is None:
                 out = torch.empty_like(x)
+            if _DISABLE_JIT:
+                return func(*args, **(kwargs or {}))
 
             def f32(v, default):
                 if v is None:
@@ -261,6 +298,8 @@ class _GPUOSSchedulerMode(torch.utils._python_dispatch.TorchDispatchMode):
             x = args[0]
             if torch.is_grad_enabled() or not x.is_cuda or x.numel() > self.size_threshold:
                 return func(*args, **(kwargs or {}))
+            if _DISABLE_JIT:
+                return func(*args, **(kwargs or {}))
             # Extract dim and keepdim
             dim = None
             keepdim = bool((kwargs or {}).get('keepdim', False))
@@ -319,7 +358,7 @@ class _GPUOSSchedulerMode(torch.utils._python_dispatch.TorchDispatchMode):
         return out
 
     def flush_fused(self):
-        if not self.fused:
+        if _DISABLE_JIT or not self.fused:
             return
         items = list(self.fused.items())
         self.fused.clear()
