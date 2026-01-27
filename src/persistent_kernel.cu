@@ -130,10 +130,23 @@ extern "C" __global__ void init_builtin_ops() {
 }
 
 // Persistent worker kernel: each thread acts as a consumer
+// Uses host-mapped memory (zero-copy) for reliable completion detection.
+// Protocol:
+//   1. Execute operator function
+//   2. __threadfence_system() - ensure all writes are visible to CPU
+//   3. atomicAdd_system() on sync->processed - CPU can poll this directly
 extern "C" __global__ void persistent_worker(WorkQueue q) {
   if (q.capacity == 0) return;
   __shared__ Task s_task;
   __shared__ int s_has_work;
+
+  // Signal kernel is ready (only block 0, thread 0)
+  if (threadIdx.x == 0 && blockIdx.x == 0 && q.sync != nullptr) {
+    __threadfence_system();
+    atomicExch_system((int*)&q.sync->ready, 1);
+  }
+  __syncthreads();
+
   while (atomicAdd(q.quit, 0) == 0) {
     if (threadIdx.x == 0) {
       s_has_work = 0;
@@ -157,7 +170,12 @@ extern "C" __global__ void persistent_worker(WorkQueue q) {
     __syncthreads();
     if (!s_has_work) {
       if (threadIdx.x == 0 && blockIdx.x == 0) {
+        // Update heartbeat in both legacy counter and host-mapped sync state
         atomicAdd(&g_heartbeat, 1ULL);
+        if (q.sync != nullptr) {
+          // System-scope atomic ensures CPU sees update immediately
+          atomicAdd_system((unsigned long long*)&q.sync->heartbeat, 1ULL);
+        }
       }
       __nanosleep(1000);
       continue;
@@ -177,7 +195,20 @@ extern "C" __global__ void persistent_worker(WorkQueue q) {
       fn(s_task);
       __syncthreads();
       if (threadIdx.x == 0) {
+        // CRITICAL: Memory fence BEFORE signaling completion
+        // This ensures all tensor data writes are globally visible
+        // before the host observes the incremented counter.
+        __threadfence_system();
+
+        // Update legacy counter (device-managed)
         atomicAdd(&g_processed_count, 1ULL);
+
+        // Update host-mapped counter with system-scope atomic
+        // The CPU can poll this directly without memory copies
+        if (q.sync != nullptr) {
+          atomicAdd_system((unsigned long long*)&q.sync->processed, 1ULL);
+        }
+
         if (g_debug_level > 1) {
           printf("[worker] completed op=%d, processed=%llu\n", s_task.op, (unsigned long long)g_processed_count);
         }

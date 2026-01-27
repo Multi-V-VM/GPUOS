@@ -45,13 +45,26 @@ struct Task {
   TensorRef  out0;      // output 0
 };
 
+// Synchronization state for reliable completion detection (host-mapped/zero-copy memory)
+// This structure resides in pinned host memory, mapped into GPU address space.
+// The GPU writes to it using system-scope atomics after __threadfence_system().
+// The host polls these values directly without any memory copies.
+struct SyncState {
+  volatile unsigned long long processed;   // Tasks completed (GPU increments, host polls)
+  volatile unsigned long long submitted;   // Tasks submitted (host increments)
+  volatile unsigned long long heartbeat;   // Idle counter (GPU increments when no work)
+  volatile int                ready;       // Kernel ready flag (GPU sets to 1)
+  char                        _pad[32];    // Padding to avoid false sharing
+};
+
 // Work queue (host producer, device consumers)
 struct WorkQueue {
-  Task* tasks;     // ring buffer
-  int   capacity;  // ring capacity
-  int*  head;      // device-side pop index
-  int*  tail;      // host-side push index
-  int*  quit;      // stop flag (host sets to 1)
+  Task* tasks;       // ring buffer
+  int   capacity;    // ring capacity
+  int*  head;        // device-side pop index
+  int*  tail;        // host-side push index
+  int*  quit;        // stop flag (host sets to 1)
+  SyncState* sync;   // host-mapped sync state (zero-copy)
 };
 
 // Device function pointer signature for operators

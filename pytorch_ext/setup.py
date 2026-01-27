@@ -24,7 +24,7 @@ setup(
             extra_compile_args={
                 'cxx': ['-O3', '-std=c++17'],
                 'nvcc': ['-O3', '-std=c++17', '--expt-relaxed-constexpr',
-                        '-gencode=arch=compute_121,code=sm_121']
+                        '-gencode=arch=compute_120,code=sm_120']
             },
             extra_link_args=[
                 '-L/usr/local/cuda/lib64',

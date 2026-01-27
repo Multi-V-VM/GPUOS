@@ -53,16 +53,21 @@ class BenchmarkTimer:
         self.trim_percent = trim_percent
         self.times = []
 
-    def benchmark(self, func: Callable, *args, **kwargs) -> Tuple[float, float, float, float]:
+    def benchmark(self, func: Callable, *args, use_event_sync: bool = False, **kwargs) -> Tuple[float, float, float, float]:
         """
         Benchmark a function with CUDA events
         Returns: (mean_ms, std_ms, min_ms, max_ms)
+
+        Args:
+            use_event_sync: If True, use event.synchronize() instead of torch.cuda.synchronize().
+                           This is needed for persistent kernel scenarios where device-wide sync blocks.
         """
         # Warmup
         for _ in range(self.warmup_iters):
             func(*args, **kwargs)
 
-        torch.cuda.synchronize()
+        if not use_event_sync:
+            torch.cuda.synchronize()
 
         # Measurement
         times = []
@@ -75,7 +80,11 @@ class BenchmarkTimer:
             func(*args, **kwargs)
             end_event.record()
 
-            torch.cuda.synchronize()
+            if use_event_sync:
+                # Only wait for this specific event, not all device work
+                end_event.synchronize()
+            else:
+                torch.cuda.synchronize()
             elapsed = start_event.elapsed_time(end_event)  # milliseconds
             times.append(elapsed)
             if show_prog and (i % max(1, self.measure_iters // 10) == 0):

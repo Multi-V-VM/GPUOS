@@ -115,7 +115,9 @@ def benchmark_gpuos(num_ops: int, tensor_size: int) -> tuple:
                     pass
 
     timer = BenchmarkTimer(warmup_iters=50, measure_iters=500)
-    mean_ms, std_ms, min_ms, max_ms = timer.benchmark(workload)
+    # Use event sync instead of torch.cuda.synchronize() because device-wide sync
+    # would block forever on the persistent kernel.
+    mean_ms, std_ms, min_ms, max_ms = timer.benchmark(workload, use_event_sync=True)
 
     result_out = out.clone()
     gpuos_ext.shutdown()

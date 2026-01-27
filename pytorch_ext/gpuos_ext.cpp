@@ -74,6 +74,19 @@ static int g_blocks = 0;
 static int g_threads_per_block = 0;
 static int g_tail_shadow = 0;
 
+// Host-mapped synchronization state (zero-copy memory)
+// This memory is allocated with cudaHostAllocMapped:
+//   - Host can read/write directly via g_sync_host
+//   - GPU accesses same memory via g_sync_dev (device pointer alias)
+// No memory copies needed - just volatile reads/writes!
+static SyncState* g_sync_host = nullptr;    // Host-side pointer (for polling)
+static SyncState* g_sync_dev = nullptr;     // Device-side alias (passed to kernel)
+static unsigned long long g_submitted_count = 0; // Host-side submitted task counter
+
+// Forward declarations
+static void ensure_worker_alive();
+bool worker_alive();
+
 // Pending micro-requests to be aggregated
 static std::vector<Task> g_pending;
 static const int kBatchSlot = 10; // slot id for aggregated operator
@@ -108,6 +121,96 @@ static unsigned long long get_heartbeat() {
   return h;
 }
 
+// ============================================================================
+// Zero-Copy Synchronization API
+// ============================================================================
+// These functions provide efficient host-side polling without any CUDA API
+// calls or memory copies. The GPU writes to host-mapped memory using
+// system-scope atomics after __threadfence_system(), ensuring immediate
+// visibility to the CPU.
+
+// Poll processed count directly from host-mapped memory (zero-copy)
+// No CUDA calls, no memory copies - just a volatile read!
+static inline unsigned long long poll_processed_count() {
+  if (g_sync_host == nullptr) return get_processed_count(); // fallback
+  // Volatile read ensures we see GPU's latest write
+  return g_sync_host->processed;
+}
+
+// Poll heartbeat directly from host-mapped memory
+static inline unsigned long long poll_heartbeat() {
+  if (g_sync_host == nullptr) return get_heartbeat(); // fallback
+  return g_sync_host->heartbeat;
+}
+
+// Check if kernel is ready (signaled via host-mapped memory)
+static inline bool poll_kernel_ready() {
+  if (g_sync_host == nullptr) return true; // assume ready if no sync state
+  return g_sync_host->ready != 0;
+}
+
+// Wait for tasks to complete using zero-copy polling
+// This is the main synchronization primitive for the host.
+// Protocol:
+//   1. Host submits tasks and increments g_submitted_count
+//   2. Host calls sync_wait_for_completion(target_count)
+//   3. Host polls g_sync_host->processed until >= target_count
+//   4. When condition met, all submitted tasks have completed and
+//      their memory writes are globally visible (due to __threadfence_system)
+static void sync_wait_for_completion(unsigned long long target, int timeout_ms = 30000) {
+  if (g_sync_host == nullptr) {
+    // Fallback to legacy polling (uses cudaMemcpy)
+    while (get_processed_count() < target) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    return;
+  }
+
+  auto start = std::chrono::steady_clock::now();
+  int spins = 0;
+  while (true) {
+    // Zero-copy read - no CUDA API call needed!
+    unsigned long long done = g_sync_host->processed;
+    if (done >= target) break;
+
+    // Spin-wait with backoff
+    if (spins < 100) {
+      // Initial tight spin loop (sub-microsecond latency)
+      #if defined(__x86_64__) || defined(_M_X64)
+      __builtin_ia32_pause(); // x86 PAUSE instruction
+      #else
+      std::this_thread::yield();
+      #endif
+      spins++;
+    } else if (spins < 1000) {
+      // Short sleep for moderate waits
+      std::this_thread::sleep_for(std::chrono::microseconds(10));
+      spins++;
+    } else {
+      // Longer sleep for extended waits
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+
+      // Check for timeout
+      auto now = std::chrono::steady_clock::now();
+      auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - start).count();
+      if (elapsed_ms > timeout_ms) {
+        fprintf(stderr, "[sync] timeout waiting for completion: done=%llu target=%llu\n", done, target);
+        // Check if worker is alive
+        if (!worker_alive()) {
+          if (g_verbose_level > 0) fprintf(stderr, "[sync] worker not alive; relaunching...\n");
+          ensure_worker_alive();
+        }
+      }
+
+      // Periodic status for debugging
+      if (g_verbose_level > 0 && (spins % 200) == 0) {
+        unsigned long long hb = g_sync_host->heartbeat;
+        fprintf(stderr, "[sync] waiting... processed=%llu target=%llu heartbeat=%llu\n", done, target, hb);
+      }
+    }
+  }
+}
+
 static void ensure_worker_alive() {
   if (!g_started) return;
   cudaError_t st = cudaStreamQuery(g_kernel_stream);
@@ -116,7 +219,17 @@ static void ensure_worker_alive() {
     int zero = 0;
     CUDA_RT_CHECK(cudaMemcpyAsync(g_q.quit, &zero, sizeof(zero), cudaMemcpyHostToDevice, g_ctrl_stream));
     CUDA_RT_CHECK(cudaStreamSynchronize(g_ctrl_stream));
+    // Reset kernel ready flag before relaunching
+    if (g_sync_host) {
+      g_sync_host->ready = 0;
+    }
     CUDA_RT_CHECK(launch_persistent_worker(g_q, g_blocks, g_threads_per_block, g_kernel_stream));
+    // Wait for kernel to signal ready
+    if (g_sync_host) {
+      while (g_sync_host->ready == 0) {
+        std::this_thread::yield();
+      }
+    }
     if (g_verbose_level > 0) {
       fprintf(stderr, "[host] worker relaunched (blocks=%d threads=%d)\n", g_blocks, g_threads_per_block);
     }
@@ -249,11 +362,18 @@ static void set_table_slot_async(int index, OpPtrInt fn_addr) {
   CUDA_RT_CHECK(gpu_set_op_table_async(index, fn_addr, g_ctrl_stream));
 }
 
+// Track old buffers to free at shutdown (can't cudaFree while persistent kernel runs)
+static std::vector<void*> g_old_batch_buffers;
+
 static Task* ensure_batch_buffer(size_t count) {
   if (count == 0) return nullptr;
   if (count > g_batch_capacity) {
+    // IMPORTANT: Don't cudaFree the old buffer while persistent kernel is running!
+    // cudaFree is a synchronizing operation that waits for all device work,
+    // which would block forever since the persistent kernel never finishes.
+    // Instead, save old buffer to free at shutdown.
     if (g_batch_buffer) {
-      CUDA_RT_CHECK(cudaFree(g_batch_buffer));
+      g_old_batch_buffers.push_back(g_batch_buffer);
     }
     CUDA_RT_CHECK(cudaMalloc(&g_batch_buffer, count * sizeof(Task)));
     g_batch_capacity = count;
@@ -341,6 +461,24 @@ void init(int capacity, int threads_per_block) {
   CUDA_RT_CHECK(cudaMemset(g_q.tail, 0, sizeof(int)));
   CUDA_RT_CHECK(cudaMemset(g_q.quit, 0, sizeof(int)));
   g_tail_shadow = 0;
+
+  // Allocate host-mapped synchronization state (zero-copy memory)
+  // This enables efficient completion detection without memory copies:
+  //   - GPU writes via atomicAdd_system after __threadfence_system
+  //   - Host polls via volatile reads (no CUDA calls needed)
+  // Note: Do NOT use cudaHostAllocWriteCombined since GPU writes and host reads
+  CUDA_RT_CHECK(cudaHostAlloc((void**)&g_sync_host, sizeof(SyncState),
+                               cudaHostAllocMapped));
+  // Get device-visible pointer alias for the same physical memory
+  CUDA_RT_CHECK(cudaHostGetDevicePointer((void**)&g_sync_dev, g_sync_host, 0));
+  // Initialize sync state
+  g_sync_host->processed = 0;
+  g_sync_host->submitted = 0;
+  g_sync_host->heartbeat = 0;
+  g_sync_host->ready = 0;
+  g_submitted_count = 0;
+  g_q.sync = g_sync_dev; // Pass device alias to kernel
+
   // Streams
   CUDA_RT_CHECK(cudaStreamCreateWithFlags(&g_kernel_stream, cudaStreamNonBlocking));
   CUDA_RT_CHECK(cudaStreamCreateWithFlags(&g_ctrl_stream, cudaStreamNonBlocking));
@@ -353,6 +491,24 @@ void init(int capacity, int threads_per_block) {
   g_blocks = sm;
   g_threads_per_block = threads_per_block;
   CUDA_RT_CHECK(launch_persistent_worker(g_q, g_blocks, g_threads_per_block, g_kernel_stream));
+
+  // Wait for kernel to signal ready via host-mapped memory (with timeout)
+  // Note: The kernel sets sync->ready = 1 after launching
+  if (g_sync_host) {
+    auto start = std::chrono::steady_clock::now();
+    while (g_sync_host->ready == 0) {
+      std::this_thread::yield();
+      auto now = std::chrono::steady_clock::now();
+      auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - start).count();
+      // Short timeout - if kernel doesn't signal ready quickly, proceed anyway
+      // The sync mechanism will still work for completion detection
+      if (elapsed_ms > 1000) {
+        // Kernel may not support ready signal or there's an issue
+        // Proceed anyway - the main sync (processed counter) is what matters
+        break;
+      }
+    }
+  }
   g_started = true;
   // Optional: set debug level from env
   const char* dbg = std::getenv("GPUOS_DEBUG");
@@ -378,6 +534,8 @@ void init(int capacity, int threads_per_block) {
     fprintf(stderr, "[host] queue tasks=%p head=%p tail=%p quit=%p\n", (void*)g_q.tasks, (void*)g_q.head, (void*)g_q.tail, (void*)g_q.quit);
     fprintf(stderr, "[host] staging=%s\n", g_staging == StagingMode::MappedHost ? "mapped" : "device");
     fprintf(stderr, "[host] shard_size=%d\n", g_shard_size);
+    fprintf(stderr, "[host] sync_enabled=%s sync_host=%p sync_dev=%p\n",
+            g_sync_host ? "true" : "false", (void*)g_sync_host, (void*)g_sync_dev);
   }
 }
 
@@ -393,6 +551,14 @@ void shutdown() {
   CUDA_RT_CHECK(cudaFree(g_q.head));
   CUDA_RT_CHECK(cudaFree(g_q.tail));
   CUDA_RT_CHECK(cudaFree(g_q.quit));
+  // Free host-mapped sync state
+  if (g_sync_host) {
+    CUDA_RT_CHECK(cudaFreeHost(g_sync_host));
+    g_sync_host = nullptr;
+    g_sync_dev = nullptr;
+    g_q.sync = nullptr;
+  }
+  g_submitted_count = 0;
   CUDA_RT_CHECK(cudaStreamDestroy(g_kernel_stream));
   CUDA_RT_CHECK(cudaStreamDestroy(g_ctrl_stream));
   for (void* buf : g_async_buffers) {
@@ -408,6 +574,11 @@ void shutdown() {
     g_batch_buffer = nullptr;
     g_batch_capacity = 0;
   }
+  // Free old batch buffers that couldn't be freed while kernel was running
+  for (void* buf : g_old_batch_buffers) {
+    CUDA_RT_CHECK(cudaFree(buf));
+  }
+  g_old_batch_buffers.clear();
   if (g_batch_host) {
     CUDA_RT_CHECK(cudaFreeHost(g_batch_host));
     g_batch_host = nullptr;
@@ -452,6 +623,14 @@ py::dict peek_queue() {
   d["host_pending"] = (int)g_pending.size();
   d["staging"] = (g_staging == StagingMode::MappedHost) ? "mapped" : "device";
   d["shard_size"] = g_shard_size;
+  // Zero-copy sync state (host-mapped memory)
+  d["sync_enabled"] = (g_sync_host != nullptr);
+  if (g_sync_host) {
+    d["sync_processed"] = (unsigned long long)g_sync_host->processed;
+    d["sync_heartbeat"] = (unsigned long long)g_sync_host->heartbeat;
+    d["sync_ready"] = (int)g_sync_host->ready;
+    d["sync_submitted"] = g_submitted_count;
+  }
   return d;
 }
 
@@ -581,7 +760,7 @@ void flush(bool sync) {
     fprintf(stderr, "[host] enqueue %d batch shards (shard_size=%d, total=%lld)\n", shards, g_shard_size, total);
   }
   unsigned long long before = 0ULL;
-  if (sync) before = get_processed_count();
+  if (sync) before = poll_processed_count(); // Use zero-copy if available
   long long start = 0;
   for (int s = 0; s < shards; ++s) {
     long long cnt = std::min<long long>(g_shard_size, total - start);
@@ -599,23 +778,33 @@ void flush(bool sync) {
   }
   CUDA_RT_CHECK(cudaStreamSynchronize(g_ctrl_stream));
   if (sync) {
+    // Use zero-copy synchronization for efficient completion detection
+    // The GPU increments g_sync_host->processed after __threadfence_system,
+    // so when we see the counter reach target, all memory writes are visible.
     const unsigned long long target = before + (unsigned long long)shards;
-    int spins = 0;
-    while (true) {
-      unsigned long long cur = get_processed_count();
-      if (cur >= target) break;
-      // If worker yielded/ended mid-flush, relaunch it
-      if (!worker_alive()) {
-        if (g_verbose_level > 0) fprintf(stderr, "[host] worker not alive; relaunching...\n");
-        ensure_worker_alive();
-      }
-      std::this_thread::sleep_for(std::chrono::milliseconds(5));
-      if (g_verbose_level > 0 && (++spins % 40) == 0) { // ~200ms
-        int h = read_dev_int(g_q.head);
-        int t = read_dev_int(g_q.tail);
-        unsigned long long hb = get_heartbeat();
-        fprintf(stderr, "[host] wait... head=%d tail=%d processed=%llu target=%llu (before=%llu) hb=%llu\n",
-                h, t, (unsigned long long)cur, target, before, hb);
+
+    if (g_sync_host != nullptr) {
+      // Zero-copy path: poll host-mapped memory directly (no CUDA calls!)
+      sync_wait_for_completion(target);
+    } else {
+      // Legacy fallback: use cudaMemcpy-based polling
+      int spins = 0;
+      while (true) {
+        unsigned long long cur = get_processed_count();
+        if (cur >= target) break;
+        // If worker yielded/ended mid-flush, relaunch it
+        if (!worker_alive()) {
+          if (g_verbose_level > 0) fprintf(stderr, "[host] worker not alive; relaunching...\n");
+          ensure_worker_alive();
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        if (g_verbose_level > 0 && (++spins % 40) == 0) { // ~200ms
+          int h = read_dev_int(g_q.head);
+          int t = read_dev_int(g_q.tail);
+          unsigned long long hb = get_heartbeat();
+          fprintf(stderr, "[host] wait... head=%d tail=%d processed=%llu target=%llu (before=%llu) hb=%llu\n",
+                  h, t, (unsigned long long)cur, target, before, hb);
+        }
       }
     }
   }
@@ -880,4 +1069,22 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("submit_binary", &submit_binary, "Submit binary op for a slot");
   m.def("register_reduce", &register_reduce, "Register reduce op (sum/mean) and return slot");
   m.def("submit_reduce", &submit_reduce, "Submit reduce task (axes, keepdim)");
+
+  // Zero-copy synchronization API
+  m.def("sync_poll_processed", [](){
+    return poll_processed_count();
+  }, "Poll processed count from host-mapped memory (zero-copy, no CUDA calls)");
+  m.def("sync_poll_heartbeat", [](){
+    return poll_heartbeat();
+  }, "Poll heartbeat from host-mapped memory (zero-copy)");
+  m.def("sync_poll_ready", [](){
+    return poll_kernel_ready();
+  }, "Check if kernel is ready (zero-copy)");
+  m.def("sync_wait", [](unsigned long long target, int timeout_ms){
+    sync_wait_for_completion(target, timeout_ms);
+  }, "Wait for processed count to reach target (zero-copy polling)",
+     py::arg("target"), py::arg("timeout_ms")=30000);
+  m.def("sync_enabled", [](){
+    return g_sync_host != nullptr;
+  }, "Return True if zero-copy sync is enabled");
 }
