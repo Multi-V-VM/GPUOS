@@ -4,7 +4,11 @@
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cuda_bf16.h>
+#include <cuda/atomic>
 #include <stdio.h>
+#ifdef GPUOS_ENABLE_TMA
+#include "tma_copy.cuh"
+#endif
 
 // Global jump table and counters
 __device__ __managed__ OpFn g_op_table[GPUOS_MAX_OPS];
@@ -56,6 +60,42 @@ extern "C" __device__ void op_mul(const Task& t) {
     *c = (*a) * (*b);
   }
 }
+
+#ifdef GPUOS_ENABLE_TMA
+// Slot 11 is opt-in: static shared scratch affects the whole resident kernel.
+// The contract is float32 add. Irregular layouts use the existing add handler.
+// One out-of-line accessor gives initialization, dispatch and shutdown the
+// same CTA-local allocation even though operators keep the original Task ABI.
+__device__ __noinline__ gpuos::TmaState<1024,2>& worker_tma_state() {
+  #pragma nv_diag_suppress static_var_with_dynamic_init
+  __shared__ gpuos::TmaState<1024,2> state;
+  return state;
+}
+struct TmaAddConsume {
+  float* out;
+  __device__ void operator()(const float* a, const float* b, int tile) const {
+    for (int i = threadIdx.x; i < 1024; i += blockDim.x)
+      out[tile * 1024 + i] = a[i] + b[i];
+  }
+};
+extern "C" __device__ void op_tma_add(const Task& t) {
+  bool eligible = t.numel >= 1024 && t.numel <= 0x7fffffff &&
+    blockDim.x >= 32 && blockDim.x % 32 == 0;
+  for (const TensorRef* r : {&t.in0, &t.in1, &t.out0})
+    eligible = eligible && r->dtype == kF32 && r->ndim == 1 &&
+      r->strides[0] == 1 && r->sizes[0] >= t.numel &&
+      (reinterpret_cast<uintptr_t>(r->data) % 16 == 0);
+  if (!eligible) { op_add(t); return; }
+  const float* a = static_cast<const float*>(t.in0.data);
+  const float* b = static_cast<const float*>(t.in1.data);
+  float* out = static_cast<float*>(t.out0.data);
+  int tiles = static_cast<int>(t.numel / 1024);
+  gpuos::tma_pipeline<1024,2>(worker_tma_state(), tiles,
+    gpuos::BulkPair<1024>{a,b}, TmaAddConsume{out});
+  for (int64_t i = int64_t(tiles)*1024 + threadIdx.x; i < t.numel; i += blockDim.x)
+    out[i] = a[i] + b[i];
+}
+#endif
 
 static __device__ inline float ld_as_float(const TensorRef& tr, int64_t off_elems) {
   const char* base = static_cast<const char*>(tr.data);
@@ -127,9 +167,12 @@ extern "C" __global__ void init_builtin_ops() {
   if (idx == kBatchSlot) {
     g_op_table[kBatchSlot] = op_batch;
   }
+#ifdef GPUOS_ENABLE_TMA
+  if (idx == 11) g_op_table[11] = op_tma_add;
+#endif
 }
 
-// Persistent worker kernel: each thread acts as a consumer
+// Persistent worker kernel: each BLOCK acts as a consumer.
 // Uses host-mapped memory (zero-copy) for reliable completion detection.
 // Protocol:
 //   1. Execute operator function
@@ -137,8 +180,13 @@ extern "C" __global__ void init_builtin_ops() {
 //   3. atomicAdd_system() on sync->processed - CPU can poll this directly
 extern "C" __global__ void persistent_worker(WorkQueue q) {
   if (q.capacity == 0) return;
+#ifdef GPUOS_ENABLE_TMA
+  gpuos::tma_init(worker_tma_state());
+#endif
   __shared__ Task s_task;
   __shared__ int s_has_work;
+  __shared__ int s_quit;
+  __shared__ OpFn s_fn;
 
   // Signal kernel is ready (only block 0, thread 0)
   if (threadIdx.x == 0 && blockIdx.x == 0 && q.sync != nullptr) {
@@ -147,7 +195,16 @@ extern "C" __global__ void persistent_worker(WorkQueue q) {
   }
   __syncthreads();
 
-  while (atomicAdd(q.quit, 0) == 0) {
+  while (true) {
+    // A per-thread quit test can split a block around __syncthreads().
+    if (threadIdx.x == 0) s_quit = atomicAdd(q.quit, 0);
+    __syncthreads();
+    if (s_quit) {
+#ifdef GPUOS_ENABLE_TMA
+      gpuos::tma_destroy(worker_tma_state());
+#endif
+      return;
+    }
     if (threadIdx.x == 0) {
       s_has_work = 0;
       // Robust claim: CAS increments head only if work is available
@@ -181,25 +238,27 @@ extern "C" __global__ void persistent_worker(WorkQueue q) {
       continue;
     }
 
-    // Ensure we observe the latest function table contents
-    __threadfence();
-    OpFn fn = nullptr;
-    if (s_task.op >= 0 && s_task.op < GPUOS_MAX_OPS) {
-      int phys = atomicAdd(&g_op_alias[s_task.op], 0);
-      if (phys >= 0 && phys < GPUOS_MAX_OPS) {
-        unsigned long long p = atomicAdd((unsigned long long*)&g_op_table[phys], 0ULL);
-        fn = (OpFn)p;
+    // Resolve once per block. A live alias change must not send different
+    // lanes of one operator invocation to different functions/barriers.
+    if (threadIdx.x == 0) {
+      s_fn = nullptr;
+      if (s_task.op >= 0 && s_task.op < GPUOS_MAX_OPS) {
+        int phys = cuda::atomic_ref<int, cuda::thread_scope_device>(g_op_alias[s_task.op])
+                     .load(cuda::memory_order_acquire);
+        if (phys >= 0 && phys < GPUOS_MAX_OPS) {
+          s_fn = cuda::atomic_ref<OpFn, cuda::thread_scope_device>(g_op_table[phys])
+                     .load(cuda::memory_order_acquire);
+        }
       }
     }
-    if (fn) {
-      fn(s_task);
+    __syncthreads();
+    if (s_fn) {
+      s_fn(s_task);
+      // A fence only orders the calling thread's writes. Every output-writing
+      // thread must fence before the leader signals system-visible completion.
+      __threadfence_system();
       __syncthreads();
       if (threadIdx.x == 0) {
-        // CRITICAL: Memory fence BEFORE signaling completion
-        // This ensures all tensor data writes are globally visible
-        // before the host observes the incremented counter.
-        __threadfence_system();
-
         // Update legacy counter (device-managed)
         atomicAdd(&g_processed_count, 1ULL);
 
@@ -223,15 +282,21 @@ extern "C" __global__ void persistent_worker(WorkQueue q) {
         }
       }
       __syncthreads();
-      if (atomicAdd(q.quit, 0) != 0) {
-        return; // exit this block immediately if quit was requested
-      }
     }
   }
 }
 
 // Host-callable launchers to avoid <<< >>> in non-CUDA translation units
+__global__ void publish_op(int index, OpPtrInt fn);
+__global__ void publish_alias(int logical, int physical);
 extern "C" cudaError_t launch_init_builtin_ops(cudaStream_t stream) {
+  // Resolve control kernels before a resident worker starts: lazy module
+  // loading on first use may otherwise synchronize a never-ending context.
+  cudaFuncAttributes attributes{};
+  cudaError_t status = cudaFuncGetAttributes(&attributes, publish_op);
+  if (status != cudaSuccess) return status;
+  status = cudaFuncGetAttributes(&attributes, publish_alias);
+  if (status != cudaSuccess) return status;
   dim3 blk(128);
   dim3 grd((GPUOS_MAX_OPS + blk.x - 1) / blk.x);
   init_builtin_ops<<<grd, blk, 0, stream>>>();
@@ -248,12 +313,28 @@ extern "C" cudaError_t gpu_get_processed_count_async(unsigned long long* out, cu
   return cudaMemcpyFromSymbolAsync(out, g_processed_count, sizeof(*out), 0, cudaMemcpyDeviceToHost, s);
 }
 
+// Publication uses atomic stores, paired with the worker's acquire loads.
+// These control kernels need spare residency; module reclamation still requires
+// draining all tasks that can hold an old pointer.
+__global__ void publish_op(int index, OpPtrInt fn) {
+  cuda::atomic_ref<OpFn, cuda::thread_scope_device>(g_op_table[index])
+      .store(reinterpret_cast<OpFn>(fn), cuda::memory_order_release);
+}
+__global__ void publish_alias(int logical, int physical) {
+  cuda::atomic_ref<int, cuda::thread_scope_device>(g_op_alias[logical])
+      .store(physical, cuda::memory_order_release);
+}
 extern "C" cudaError_t gpu_set_op_table_async(int index, OpPtrInt fn, cudaStream_t s) {
-  return cudaMemcpyToSymbolAsync(g_op_table, &fn, sizeof(fn), index * sizeof(OpFn), cudaMemcpyHostToDevice, s);
+  if (index < 0 || index >= GPUOS_MAX_OPS) return cudaErrorInvalidValue;
+  publish_op<<<1, 1, 0, s>>>(index, fn);
+  return cudaGetLastError();
 }
 
 extern "C" cudaError_t gpu_set_alias_async(int logical_id, int physical_slot, cudaStream_t s) {
-  return cudaMemcpyToSymbolAsync(g_op_alias, &physical_slot, sizeof(physical_slot), logical_id * sizeof(int), cudaMemcpyHostToDevice, s);
+  if (logical_id < 0 || logical_id >= GPUOS_MAX_OPS ||
+      physical_slot < 0 || physical_slot >= GPUOS_MAX_OPS) return cudaErrorInvalidValue;
+  publish_alias<<<1, 1, 0, s>>>(logical_id, physical_slot);
+  return cudaGetLastError();
 }
 
 extern "C" cudaError_t gpu_get_heartbeat_async(unsigned long long* out, cudaStream_t s) {

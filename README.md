@@ -1,4 +1,30 @@
-# Persistent Kernel + JIT-Injected Operators (CUDA)
+# FuseOS: Fused Persistent Execution for Dynamic Inference
+
+The [IPDPS manuscript](69e5c13c57662528991eb76c/FuseOS-IPDPS-2027.pdf) presents a system for **dynamism**: GPU request retirement, ready-tile assignment, operator fusion and storage lifetime reuse. The [current Qwen3-0.6B executor](experiments/fusion_persistent/README.md) runs complete decode in one bounded persistent launch after native prefill, without CUDA Graphs on the FuseOS path.
+
+The new suite retains **1,380 complete requests, 120 shared-reservation decode trials, and 300 real-MPS groups**. Strong controls include fused/separate tile-grid+PDL and CLC+PDL, fixed workspace planning, cyclic claims, and actual four-process MPS with shared weights. Selected fused kernels pass memcheck and synccheck. Native numerical compatibility still fails in four of six cases; [paper.md](paper.md) states the exact performance and numerical boundaries.
+
+The design offers a software pool for compatible trusted requests. It does not supply MIG isolation, continuous admission or general device allocation. The full ResNet-18 benchmark is retained as a boundary case where partial residual persistence loses.
+
+See [paper sources and build instructions](69e5c13c57662528991eb76c/README.md). The manuscript uses ten body pages plus one references page. All original figures remain unchanged in a [separate comparison](69e5c13c57662528991eb76c/FuseOS-original-figures.pdf). Earlier [persistent-decode](experiments/persistent_decode/README.md), [launch-control](experiments/launch_controls/README.md), [selected-operator](experiments/e2e/README.md) and [online](benchmark_results/revision_20261003_extended/README.md) suites remain historical evidence with distinct protocols.
+
+The legacy descriptor/function-table prototype below remains separate from the specialized dynamic inference executor.
+
+`GPUOS_ENABLE_TMA=ON` adds an experimental bulk-TMA float32 add handler at slot 11.
+It is off by default because shared scratch affects residency. Worker-lifetime
+barrier state resolves the observed reuse warnings; all four sanitizer tools
+pass on the bounded benchmark and actual handler. The replicated evaluation
+contains 162,000 checked timings, including stronger float4 and subdivided-grid
+controls. See the [raw results](benchmark_results/revision_20261003_followup/README.md).
+The bounded tensor-map benchmark is a separate path; no
+cross-SM TMA communication is implemented. See the [experiment instructions](experiments/README.md).
+
+This remains a research prototype. The worker now takes a block-uniform operator
+and shutdown snapshot, but the extension's ring reuse, dependency handling,
+asynchronous tensor lifetimes, and live JIT module loading still need validation.
+Control publication requires spare GPU residency; old modules must stay loaded
+until their callers finish. The new correctness test covers alias updates and
+termination, not the full PyTorch integration.
 
 This example demonstrates a practical pattern for running a persistent kernel on NVIDIA GPUs while hot-swapping device-side operators at runtime using NVRTC JIT and a device function-pointer jump table.
 
@@ -92,7 +118,7 @@ Reductions (beta):
 
 ## Notes
 - The queue is implemented with Unified Memory for simplicity. For production, prefer explicit device memory plus lightweight doorbells (atomics in mapped pinned memory) to avoid UM migration overhead.
-- `g_op_table` is declared `__managed__` to simplify host updates (we use `cudaMemcpyToSymbol` with an offset). Workers call `__threadfence()` before reading the table.
+- `g_op_table` is declared `__managed__`. Control kernels publish table and alias entries with release stores; the worker leader uses acquire loads and broadcasts one pointer to its block. Those control kernels are resolved before worker startup and require spare residency.
 - The JIT module exports a bridge `__device__ void* op_mul_ptr = (void*)op_mul;` so the host can fetch the function pointer value via `cuModuleGetGlobal` + `cuMemcpyDtoH` and store it in `g_op_table[op_id]`.
 - The sample keeps the CUmodule alive. In a real system, track modules per operator to unload/replace safely when no tasks are executing that operator.
 - If you need to support multiple operator signatures, create multiple jump tables or a thin bytecode interpreter.
