@@ -1,20 +1,24 @@
 # GPUOS: An Operating-System Architecture for Shared GPU Execution
 
-The current [main.tex](paper/osdi/main.tex) builds a **12-page body plus one
-reference page**: [GPUOS-arXiv.pdf](paper/osdi/GPUOS-arXiv.pdf).
-It unifies the GPU-OS ideas into process/task/lease semantics, compiler safe
-points, scheduling, resource governance, admission, and hardware interfaces,
-with attribution to [Nourai and Bastani](https://arxiv.org/abs/2611.08720).
-The paper preserves the prior Figure 1 and Figure 2 and uses tables for
-additional results. [Build and source instructions](paper/osdi/README.md)
-and [claim provenance](paper/osdi/CLAIMS.md) accompany the manuscript.
+The authoritative entry point is the **IPDPS manuscript
+[main.tex](69e5c13c57662528991eb76c/main.tex)**, in the original IEEEtran format
+with the existing author list. [Current PDF](69e5c13c57662528991eb76c/FuseOS-IPDPS-2027.pdf)
+has **12 body pages plus one reference page**.
+[Portable LaTeX package](69e5c13c57662528991eb76c/FuseOS-IPDPS-source.zip)
+and [build instructions](69e5c13c57662528991eb76c/README.md) accompany it.
 
-This is a complete architecture manuscript supported by component experiments,
-not a claim that unintegrated services are a finished general-purpose OS.
-Implementation and additional benchmark execution are paused. Completed
-RTX 5090 diagnostics and compiler checks are described within their tested
-scope; incomplete multi-process rounds are excluded from aggregate claims.
-The older evaluation PDF remains available below and in the archive.
+The text unifies process/task/lease semantics, compiler safe points,
+scheduling, resource governance, admission, and hardware interfaces, with
+attribution to [Nourai and Bastani](https://arxiv.org/abs/2611.08720).
+It preserves the two previously selected qualified plots and uses tables for
+additional results. Existing measurements and proposed services remain distinct.
+Implementation and additional GPU experiments remain paused.
+
+The previous update targeted `paper/osdi/main.tex` by mistake. That file is
+retained as an alternate-format revision; the IPDPS `main.tex` above is now
+the corrected target. Its earlier source and PDF were backed up locally before
+replacement. [Claim provenance](69e5c13c57662528991eb76c/CLAIMS.md) documents
+which evidence supports the architecture.
 
 ---
 

@@ -1,0 +1,28 @@
+{
+  "entry_point": "69e5c13c57662528991eb76c/main.tex",
+  "format": "Unmodified IEEEtran conference, 10 pt, letterpaper",
+  "body_pages": 12,
+  "reference_pages": 1,
+  "references_start_page": 13,
+  "author_list_preserved": true,
+  "figures": [
+    {
+      "label": "fig:request",
+      "number": 1,
+      "page": 8
+    },
+    {
+      "label": "fig:geometry",
+      "number": 2,
+      "page": 9
+    }
+  ],
+  "figure_sha256": {
+    "01_request.pdf": "3fa7a03ad50082f8f5ff7ca8cb007b98e6940508c98ea8b42b8f43c0252c23cb",
+    "02_workload_boundary.pdf": "a04b4c960c0b340f2f064c58ece3f6addd115b706bbe4f30d22bb8ff4e2288e5"
+  },
+  "pdf_sha256": "857eb6956a84be9cec894574e54a4d41bbca9265039e3139f69053682bca2435",
+  "overfull_boxes": 0,
+  "undefined_references": 0,
+  "visual_review": "All 13 pages rendered and inspected; original figure artwork retained."
+}

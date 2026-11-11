@@ -1,0 +1,54 @@
+\documentclass[conference,10pt,letterpaper]{IEEEtran}
+\usepackage{cite}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs,array}
+\usepackage{xspace}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,fit}
+\usepackage[hidelinks]{hyperref}
+\usepackage{xurl}
+\hypersetup{pdfauthor={},pdftitle={FuseOS: Fused Persistent Execution for Dynamic Inference},pdfsubject={Anonymous IPDPS manuscript}}
+\newcommand{\sys}{\textsc{GPUOS}\xspace}
+\newcommand{\code}[1]{\texttt{\detokenize{#1}}}
+\newcommand{\aidraft}{~\cite{Codex}}
+\newcolumntype{P}[1]{>{\raggedright\arraybackslash}p{#1}}
+\begin{document}
+\bstctlcite{IEEEexample:BSTcontrol}
+\title{GPUOS: A GPU Operating System Primitive for Transparent Operation Fusion}
+\author{Yiwei Yang, Xiangyu Gao, Yuan Zhou, Yuhang Gan, Yusheng Zheng, Andi Quinn}
+\maketitle
+\begin{abstract}
+Dynamic inference changes its live requests, ready work and transient-storage
+requirements during execution. FuseOS couples these decisions in a fused
+persistent resource pool: the GPU retires requests, assigns ready tiles and
+reuses scratch at phase-completion boundaries. A Qwen3-0.6B integration executes
+all decoder layers and remaining greedy tokens in one cooperative launch after
+native prefill. Paired gate/up and activation fusion halves global temporary
+storage from 24 to 12 KiB per live request, while lifetime overlay prevents
+independent handler arrays from accumulating in shared memory. Across four
+matched cases on an RTX 5090, fused persistent decode is 1.14--1.20$\times$
+faster than the best measured tile-grid+PDL or CLC+PDL variant, allowing either
+fused or separate MLP handlers. A launch-only reservation control rules out
+shared-memory capacity alone as the explanation for the overlay benefit.
+Fixed region planning matches per-token rebuilding, locating the useful
+allocation mechanism in reuse rather than repeated planning. Real four-client
+MPS comparisons show benefits and run variation for trusted request pooling.
+Complete-request and ResNet-18 benchmarks expose integration limits. Matched
+custom controls are bitwise identical; two of six Qwen cases pass the unchanged
+native numerical gate, so native-model speedups are qualified separately.
+AI assistance is disclosed in Acknowledgments~\cite{Codex}.
+\end{abstract}
+\begin{IEEEkeywords}
+GPU runtime, dynamism, persistent kernels, load balancing, workspace allocation
+\end{IEEEkeywords}
+\input{ipdps_fusion_intro.tex}
+\input{ipdps_fusion_background.tex}
+\input{ipdps_fusion_design.tex}
+\input{ipdps_fusion_method.tex}
+\input{ipdps_fusion_results.tex}
+\input{ipdps_fusion_boundaries.tex}
+% \clearpage
+\bibliographystyle{IEEEtran}
+\bibliography{references}
+\end{document}

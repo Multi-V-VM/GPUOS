@@ -1,0 +1,52 @@
+\documentclass[conference,10pt,letterpaper]{IEEEtran}
+\usepackage{cite}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx,booktabs,array}
+\usepackage{dblfloatfix}
+\usepackage[hidelinks]{hyperref}
+\usepackage{xurl}
+\graphicspath{{gpuos/figures/}}
+\pagestyle{plain}
+\hypersetup{pdftitle={GPUOS: An Operating-System Architecture for Shared GPU Execution},pdfsubject={GPUOS architecture manuscript in IPDPS format}}
+\newcommand{\system}{GPUOS}
+\newcommand{\res}[1]{\csname result#1\endcsname}
+\input{gpuos/numbers}
+\input{gpuos/slack-numbers}
+\begin{document}
+\title{GPUOS: An Operating-System Architecture for Shared GPU Execution}
+\author{Yiwei Yang, Xiangyu Gao, Yuan Zhou, Yuhang Gan, Yusheng Zheng, Andi Quinn}
+\maketitle
+\begin{abstract}
+Latency-sensitive inference can leave arithmetic capacity idle while occupying
+resources needed by other GPU work. Recovering that capacity requires a
+contract for interference, suspension, and resource return. Building on
+\emph{The GPU Needs an Operating System}, we specify GPUOS, an architecture
+that represents execution as restartable tasks admitted under revocable
+resource leases. Its six layers connect compiler safe points, device dispatch,
+resource governance, interference estimates, and slack-aware admission.
+The design separates cooperative suspension, finite kernel slices, and
+driver-managed context switching, and identifies hardware services needed
+for enforceable pause and memory-quality guarantees.
+Component prototypes provide evidence on one 32-GB RTX 5090: bounded fused
+inference, a restricted FX-to-Triton compiler, cooperative background work,
+and cross-process admission. Qualified fused search reduces complete-request
+latency by \res{RequestReduction32}\% and \res{RequestReduction64}\%
+against native cached execution, while a matched CLC+PDL control remains
+faster. A streaming proxy admits \slackProxyMediumRate{} TFLOP/s of background
+work at \slackProxyMediumCost\% foreground p99 cost, but whole-step suspension
+recovers little work beside full-model replay. These measurements support
+selected mechanisms rather than a completed general-purpose implementation.
+The paper presents a unified system specification, its implemented subset,
+and the remaining compiler, service, and hardware requirements.
+\end{abstract}
+
+\input{gpuos/manuscript/design}
+\input{gpuos/manuscript/control}
+\input{gpuos/manuscript/evidence}
+\input{gpuos/manuscript/outlook}
+
+\label{page:bodyend}
+\clearpage
+\bibliographystyle{IEEEtran}
+\bibliography{gpuos/references}
+\end{document}

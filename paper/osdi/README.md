@@ -1,3 +1,7 @@
+> The requested manuscript entry point is now corrected to
+> [IPDPS main.tex](../../69e5c13c57662528991eb76c/main.tex).
+> This directory retains the earlier alternate-format revision.
+
 # GPUOS: current architecture manuscript
 
 The current entry point is [main.tex](main.tex), producing

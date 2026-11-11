@@ -1,0 +1,78 @@
+\subsection{Complete-request benefit}
+\label{sec:request}
+
+\begin{figure*}[!tbp]
+\centering
+\includegraphics[width=\textwidth]{01_request.pdf}
+\caption{\textbf{Complete Qwen3-0.6B requests after synchronization repair.}
+Each request freshly prefills a 128-token ancestor and performs output-driven
+search with at most four branches. Bars start at zero; whiskers span three
+process medians (five requests per process). Shape-cache controls reuse all
+encountered graphs; the fixed-topology control updates configuration without
+recapture. All five methods produce the same final paths for each horizon.
+The benefit over native execution includes the fused implementation as a
+whole. Cached CLC+PDL remains a stronger executor than persistence here.}
+\label{fig:request}
+\end{figure*}
+
+The FuseOS executor retains an application-level benefit after the attention repair.
+For 32 search steps, the complete request takes \res{Persistent32}\,ms,
+compared with \res{Native32}\,ms for native shape-cached execution
+(\res{RequestGain32}$\times$). For 64 steps, the corresponding times are
+\res{Persistent64}\,ms and \res{Native64}\,ms
+(\res{RequestGain64}$\times$). Figure~\ref{fig:request} includes the native
+GPU-length graph, which keeps graph count bounded by frontier width rather
+than sequence depth. Thus the comparison is not against repeated Python
+launches or compulsory graph reconstruction.
+
+All 28 decoder layers and the vocabulary head execute in these intervals.
+The searches expand 128 and 251 branch-tokens respectively; the latter
+changes the live frontier between three and four branches. Both use model
+outputs for parent/token selection, and the corrected custom paths reproduce
+the final native candidate paths. The maximum request-gate NRMSE is
+\res{MaxRequestNRMSE}, below the unchanged threshold.
+
+\paragraph{What the positive result establishes.}
+The complete dynamic executor is useful for this narrow-frontier workload.
+The result does not isolate persistence from fused arithmetic. With the same
+fused handlers, shape-cached CLC+PDL completes the two requests in
+\res{CLC32}\,ms and \res{CLC64}\,ms, faster than the persistent executor.
+The fixed-topology CLC+PDL control takes \res{Fixed32}\,ms and
+\res{Fixed64}\,ms. This comparison distinguishes the cost of the execution
+protocol from the benefit of the fused implementation. We retain the full
+run ranges, including prefill variation, instead of presenting the small
+fixed-topology differences as a universal persistent advantage.
+
+\subsection{Dependence on workload geometry}
+\label{sec:geometry}
+
+\begin{figure*}[!tbp]
+\centering
+\includegraphics[width=\textwidth]{02_workload_boundary.pdf}
+\caption{\textbf{Full-model equal-work search replay.} Native output-dependent
+parent/token decisions are replayed for every backend while scoring still
+executes inside timing. The interval starts from a ready prefilled ancestor;
+it is not the complete-request interval in Figure~\ref{fig:request}. Higher
+is faster; 1$\times$ is native shape-cached execution. Every point includes all
+layers, KV updates, host policy, and synchronization. Points and whiskers are
+the median and range of three round-indexed ratios.}
+\label{fig:geometry}
+\end{figure*}
+
+We next hold the search trajectory constant to remove work differences from
+the backend comparison. Three configurations vary ancestor length $P$,
+maximum frontier width $B$, and horizon $H$: $(128,4,32)$, $(512,16,16)$, and
+$(1024,8,32)$. Each uses a native-generated, output-dependent trace. All
+qualified executors perform the same selected histories and execute the
+selection policy during timing.
+
+Figure~\ref{fig:geometry} shows that the narrow-frontier benefit does not
+extend uniformly to wider or longer-prefix cases. Persistence improves on
+the matched tile-grid and tile+PDL implementations, but native cached
+execution becomes competitive or faster as workload geometry changes.
+Shape-cached CLC+PDL provides another strong control. Since prefix, width,
+horizon, and trajectory all change between cases, this figure defines an
+observed applicability boundary rather than identifying a single causal
+shape parameter. The maximum post-fix replay NRMSE is
+\res{MaxReplayNRMSE}; timing includes no gate-failing configuration.
+

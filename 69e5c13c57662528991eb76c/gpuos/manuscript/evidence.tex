@@ -1,0 +1,212 @@
+\section{Prototype Evidence and Evaluation}
+\label{sec:evidence}
+The evaluation asks whether the architecture's component mechanisms have
+useful and correctly identified effects. It does not test a completed
+general-purpose GPU OS. We separate four evidence scopes: qualified full-model
+execution, resource-sharing microbenchmarks, compiler correctness, and a
+cross-process context-switch diagnostic. They have different timing boundaries
+and cannot be combined into a single system speedup.
+
+\subsection{Platform and qualification}
+The local experiments use one NVIDIA RTX 5090 with 170 SMs, 32 GB of memory,
+compute capability 12.0, CUDA 13.1, and driver 610.57.04. The model environment
+uses PyTorch 2.14.1+cu130. CPU and GPU clocks are not locked. The experiment
+records CPU affinity and checks competing compute processes; residual host,
+clock, and thermal variation remains. CUDA events measure device intervals,
+while host monotonic clocks measure request or process-visible latency.
+
+The Qwen3-0.6B checkpoint is revision \texttt{c1899de}. The custom fused path
+must satisfy finite full-vocabulary logits, NRMSE at most 0.01, and cosine
+similarity at least 0.999 at every tested frontier. Final free-search paths
+are checked independently. A racecheck audit found a missing warp barrier
+between reading and overwriting the online-softmax denominator. The retained
+Figure 1 and Figure 2 results use the repaired, rebuilt path and fresh
+measurements. Earlier unqualified timing records are not substituted for
+the corrected evidence.
+
+\begin{table}[t]
+\centering\small
+\begin{tabular}{p{.33\columnwidth}p{.56\columnwidth}}
+\toprule
+Evidence & Boundary and replication \\
+\midrule
+Complete requests & Fresh prefill through final D2H/text; 3 processes, 5 requests per cell. \\
+Search replay & Ready ancestor through fixed native search trace, with scoring timed; 3 process ratios. \\
+Slack sharing & 256 calibration and 512 held-out steps per cell, paired adjacent solo; 3 processes. \\
+Context diagnostic & 20 paired same-/different-process trials; one warmed pair of CUDA processes. \\
+Compiler checks & Seven graph/lifecycle tests plus separate generated-kernel sanitizer checks. \\
+\bottomrule
+\end{tabular}
+\caption{Different evidence scopes. A process range is not a confidence
+interval, and an operator result is not a complete serving measurement.}
+\label{tab:protocol}
+\end{table}
+
+Complete-request timings include native prefill, root-state publication,
+all model frontiers, branch scoring, private-history copies, final decoding,
+and synchronization in one outer interval. Weights, tokenized inputs,
+workspace, and reusable graphs are resident. We do not add stage medians
+to construct request latency. Figures retain medians and ranges across
+independent processes. A small range in such a plot is not an estimate of
+the probability that a future service request meets a deadline.
+
+\input{gpuos/manuscript/retained-results}
+
+\subsection{Mechanism and larger-model controls}
+Matched attention controls distinguish placement and task partitioning from
+execution fusion. With identical 512-key jobs, replacing round-robin placement
+with length-aware placement gives a geometric-mean
+\res{placementGeo}$\times$ speedup and a maximum
+\res{placementMax}$\times$. Changing an already sorted ordinary grid from
+four partitions to finer 128-key jobs gives \res{partitionGeo}$\times$
+geometrically, up to \res{partitionMax}$\times$. Both exploit information
+known before dispatch. They must not be presented as evidence that a device
+discovered new dynamic work more effectively.
+
+The matched CLC phase-fusion control instead retains the same compiled entry,
+task geometry, resources, and global exchange buffers, switching between
+staged and last-producer reduction. Its geometric-mean increment is
+\res{fusionGeo}$\times$. The change removes a launch but adds completion
+and ordering work. Separate cluster-transport controls likewise do not
+establish a large universal benefit from moving state across SMs. Their
+implication for the OS design is to preserve good allocation and dataflow
+plans before choosing a more elaborate execution mechanism.
+
+The Qwen3.5-35B-A3B port provides another boundary. It covers routed MoE
+work for microbatches of one to eight tokens and the DeltaNet decode path,
+while other operations remain native. Its default fused path does not beat
+native eager execution across the six evaluated workloads. Separating
+selected stages reduces two request times from 721.11 to 682.92 ms and
+from 554.12 to 547.39 ms. More fusion is therefore not an optimization
+objective by itself. This separate mixed-Q4 comparison does not establish
+BF16 accuracy or a port of every model operator to the new FX compiler.
+
+\subsection{Slack sharing and its application boundary}
+The resident-worker experiment runs independent 16$\times$16$\times$4096
+BF16 GEMMs with FP32 accumulators, four warps per CTA. After a configurable
+number $q$ of K tiles, each warp saves its accumulator and progress. The
+foreground publishes an urgency flag on its own stream. Background workers
+observe it at checkpoints but retain their allocations while paused.
+Non-yielding long- and short-quantum controls isolate the effect of responding
+to urgency from merely changing the amount of work in a quantum.
+
+The streaming foreground contains eight independent BF16 GEMVs with
+$M=2048$ and $K=8192$, reading 256 MiB of weights per step. Zero- and
+100-$\mu$s device gaps provide distinct opportunities for background work.
+This is not a transformer or a Kimi shard. The model foreground executes
+all Qwen3-0.6B layers and the vocabulary head using native cached graphs,
+with a 128-token prefix, up to four branches, and a 32-step native trace.
+Unlike Figure 2, this sharing replay excludes search scoring; unlike
+Figure 1, it excludes prefill. That distinction is preserved in the results.
+
+Each configuration has an adjacent standalone reference, randomized order,
+256 calibration steps, and 512 held-out steps in each of three fresh
+processes. CUDA-event step latency includes the urgency markers and graph
+execution but excludes the intentional gap. Background rate counts executed
+K tiles over the host start-through-stop window, including startup, gaps,
+submission, and the last slice drain. The artifact retains
+\slackTimedSteps{} foreground timings including calibration and references.
+
+\input{gpuos/slack-table}
+
+With 100-$\mu$s gaps, the selected 64-worker, $q=64$ configuration provides
+\slackProxyMediumRate{} TFLOP/s for \slackProxyMediumCost\% p99 cost.
+Shorter $q=4$ checkpoints reduce cost to \slackProxyShortCost\% but provide
+\slackProxyShortRate{} TFLOP/s. The long non-yielding control produces
+\slackProxyLongRate{} TFLOP/s at \slackProxyLongCost\% cost and misses
+the budget. Without an intentional gap, the selected configuration provides
+\slackContinuousRate{} TFLOP/s at \slackContinuousCost\% cost; launch
+and event boundaries still exist in that case.
+
+The table's normalized rate uses the fastest measured configuration of the
+same custom GEMM as its denominator. It is not a fraction of hardware peak
+and cannot be compared numerically with another implementation's ``GPU
+worth'' without matching its work and denominator. All nine frozen
+calibration selections choose the 64-worker, $q=64$ policy, and all nine
+pass held-out validation. Those observations do not establish generalization
+to a new model, a new load trace, or a changed driver.
+
+The full-model boundary is more important than the positive proxy point.
+Whole-step suspension provides only \slackModelMediumRate{} TFLOP/s,
+or \slackModelMediumFraction\% of the custom solo rate. The non-yielding
+long-quantum control instead provides \slackModelLongRate{} TFLOP/s
+while satisfying the observed p99 budget. It lacks a prompt-yield contract,
+but it is a stronger performance control for that workload. The result
+argues for phase-sensitive admission rather than protecting an entire model
+step whenever a smaller interval would suffice. Negative measured latency
+costs are retained under unlocked clocks and are not credited as a
+scheduler-induced speedup.
+
+\subsection{Checkpoint correctness and pause observations}
+The handwritten worker checks all 256 outputs per warp and saved partial
+accumulators against independent CPU arithmetic on binary-exact operands.
+Resume tests include a quantum that leaves a partial GEMM. The streaming
+outputs remain bitwise stable and selected rows pass an independent FP32
+dot-product check. The final replay's model logits match the native reference
+bitwise at every step. Bounded runs of the same worker entry pass memcheck,
+racecheck, and synccheck with kernel filters. An initial live-worker sanitizer
+attempt stalled and was terminated, so the bounded checks are not described
+as certification of all concurrent execution.
+
+A separate device probe measures urgency publication until all 64 workers
+acknowledge suspension. Its p99 is \slackPauseShort{},
+\slackPauseMedium{}, and \slackPauseLong{} $\mu$s for $q=4$, 64,
+and 4096 respectively. The diagnostic polling kernel perturbs execution
+and excludes CPU dispatch; its timings do not enter throughput aggregates.
+Non-cooperative workers time out rather than acknowledging a yield.
+The large change with quantum illustrates why block or slice lifetime is a
+first-class admission cost.
+
+The FX compiler has additional checks for broadcast/fan-out graphs, odd
+matrix dimensions, FP32/FP16/BF16 arithmetic, linear/GELU compositions,
+reductions and normalization, views, the \texttt{torch.compile} entry point,
+and rejection/lifecycle behavior. Tests vary the program-count grant during
+a partially completed reduction. Generated matrix, reduction, and pointwise
+kernels pass separate bounded sanitizer checks. These establish correctness
+for the supported cases; they do not imply coverage of arbitrary Python,
+arbitrary CUDA kernels, training, or the complete Qwen graph.
+
+\subsection{Existing hardware context switching}
+The context-switch diagnostic deliberately uses non-cooperative work. A
+background kernel launches one CTA on every SM, with more than half the
+per-SM shared memory reserved so that only one such CTA can reside per SM.
+Each CTA executes a 200-ms loop without an urgency poll. Its arithmetic
+state and shared-memory sentinel are verified after completion. The foreground
+probe reserves the same amount of shared memory, preventing it from being
+explained by spare same-context residency.
+
+\begin{table}[t]
+\centering\small
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{lrrr}
+\toprule
+Probe placement & p50 (ms) & p99 (ms) & Full overlap \\
+\midrule
+Same context, high priority & 199.910 & 199.930 & 0/20 \\
+Different CUDA process & 2.000 & 2.046 & 20/20 \\
+\bottomrule
+\end{tabular}
+\caption{Warmed submission-to-completion latency for a 10-$\mu$s probe.
+Full overlap means all 170 background CTA lifetimes enclose the complete
+probe according to device timestamps. One process pair, 20 trials per mode.}
+\label{tab:context}
+\end{table}
+
+The device advertises compute-preemption support. GPU timestamps and SM
+identifiers confirm that, in every different-process trial, the probe runs
+while all 170 background CTA lifetimes remain open. The corresponding
+register computation and shared-memory state checks pass. In the same
+context, higher stream priority does not interrupt the full-residency
+background. These observations are consistent with driver-managed hardware
+context preemption~\cite{CUDAComputePreemption}; they do not expose its
+internal save format or measure the context-save operation in isolation.
+The reported latency includes driver scheduling and submission overhead.
+
+The process harness also runs one native Qwen foreground with one or three
+compiler-generated GEMM background processes on this same device. Separate
+contexts and a private MPS service are distinct configurations. Client PIDs
+and MPS server attachment are recorded, and interrupted partial background
+work is completed and checked after timing. The broader repeated process
+sweep was paused during this paper's design-focused revision; partial rounds
+are retained but are not used to assert an aggregate service-level speedup.
+Single-device multiprocessing is not presented as multi-GPU reproduction.
