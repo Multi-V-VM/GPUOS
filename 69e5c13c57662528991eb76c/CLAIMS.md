@@ -21,14 +21,17 @@ measurement claims. The original source is Nourai and Bastani,
 
 ## Evidence anchors
 
-- Retained Figures 1–2: `gpuos/figures/01_request.pdf` and
-  `gpuos/figures/02_workload_boundary.pdf`, generated from the qualified records
-  documented by `../benchmark_results/revision_20261025_osdi/README.md`.
-  `../paper/osdi/scripts/figures.py` and `gpuos/numbers.tex` retain the data provenance.
-- Table 3, slack selection and worker diagnostics:
+- Retained Figures 1–2 are original design artwork: `img/gpuos_persistent_jit_tikz.pdf`
+  and `osdi/figures/system-overview.pdf`, copied byte-for-byte to
+  `gpuos/figures/01_system_architecture.pdf` and `02_execution_storage.pdf`.
+  Their captions distinguish architecture from measured implementation.
+- Qualified complete-request and search-replay numbers retain the data provenance
+  documented by `../benchmark_results/revision_20261025_osdi/README.md` and
+  `../paper/osdi/scripts/figures.py`; they now appear in text and tables.
+- Slack comparison table, selection and worker diagnostics:
   `../benchmark_results/slack_20261110/RESULTS.md`, `verification.json`,
   `accepted/` records, and `../experiments/slack_scheduler/analyze.py`.
-- Table 4, context-switch experiment:
+- Context-switch table and experiment:
   `../benchmark_results/process_compiler_20261110/accepted/preemption.json`;
   20 trials per mode with verified state and 170 distinct SM identifiers.
   Host latency includes submission and driver scheduling, not isolated save cost.
@@ -38,6 +41,6 @@ measurement claims. The original source is Nourai and Bastani,
   paused before the planned repeated suite finished. No aggregate performance
   claim in this paper is derived from those partial rounds.
 
-The main manuscript has two figures and four tables. `gpuos-layout-check.json`
+The main manuscript has two figures and five tables. `gpuos-layout-check.json`
 records PDF layout, included figure hashes, and recomputed diagnostic values.
 No new GPU benchmark is required to compile the manuscript.

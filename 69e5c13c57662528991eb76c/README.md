@@ -9,8 +9,11 @@ plus one reference page**. The original six-author list is preserved.
 This is an architecture paper with explicitly scoped component evidence;
 proposed services are not described as completed implementations.
 
-The two previously selected figures are the qualified request-latency and
-workload-boundary plots, copied byte-for-byte into `gpuos/figures/`.
+The two retained figures are the original **GPUOS system architecture** and
+**GPUOS execution and storage contract** diagrams, copied byte-for-byte into
+`gpuos/figures/01_system_architecture.pdf` and `02_execution_storage.pdf`.
+They appear as Figures 1 and 2 on pages 4 and 5. Qualified request/replay
+measurements are presented in text and tables, not replacement figures.
 The manuscript text and generated numerical inputs are under `gpuos/`.
 Additional scheduling and failure-handling semantics are in
 `gpuos/manuscript/control.tex`. [Claim provenance](CLAIMS.md) distinguishes

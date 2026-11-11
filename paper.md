@@ -10,8 +10,8 @@ and [build instructions](69e5c13c57662528991eb76c/README.md) accompany it.
 The text unifies process/task/lease semantics, compiler safe points,
 scheduling, resource governance, admission, and hardware interfaces, with
 attribution to [Nourai and Bastani](https://arxiv.org/abs/2611.08720).
-It preserves the two previously selected qualified plots and uses tables for
-additional results. Existing measurements and proposed services remain distinct.
+It preserves the original GPUOS system-architecture and execution/storage
+contract diagrams as Figures 1–2; measurements appear in text and tables. Existing measurements and proposed services remain distinct.
 Implementation and additional GPU experiments remain paused.
 
 The previous update targeted `paper/osdi/main.tex` by mistake. That file is

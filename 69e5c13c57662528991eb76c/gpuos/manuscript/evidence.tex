@@ -20,7 +20,7 @@ must satisfy finite full-vocabulary logits, NRMSE at most 0.01, and cosine
 similarity at least 0.999 at every tested frontier. Final free-search paths
 are checked independently. A racecheck audit found a missing warp barrier
 between reading and overwriting the online-softmax denominator. The retained
-Figure 1 and Figure 2 results use the repaired, rebuilt path and fresh
+request and replay results use the repaired, rebuilt path and fresh
 measurements. Earlier unqualified timing records are not substituted for
 the corrected evidence.
 
@@ -46,8 +46,8 @@ Complete-request timings include native prefill, root-state publication,
 all model frontiers, branch scoring, private-history copies, final decoding,
 and synchronization in one outer interval. Weights, tokenized inputs,
 workspace, and reusable graphs are resident. We do not add stage medians
-to construct request latency. Figures retain medians and ranges across
-independent processes. A small range in such a plot is not an estimate of
+to construct request latency. The underlying records retain process medians and ranges. A small range is
+not an estimate of
 the probability that a future service request meets a deadline.
 
 \input{gpuos/manuscript/retained-results}
@@ -96,8 +96,8 @@ $M=2048$ and $K=8192$, reading 256 MiB of weights per step. Zero- and
 This is not a transformer or a Kimi shard. The model foreground executes
 all Qwen3-0.6B layers and the vocabulary head using native cached graphs,
 with a 128-token prefix, up to four branches, and a 32-step native trace.
-Unlike Figure 2, this sharing replay excludes search scoring; unlike
-Figure 1, it excludes prefill. That distinction is preserved in the results.
+Unlike the equal-work search replay, this sharing replay excludes search
+scoring; unlike the complete-request experiment, it excludes prefill. That distinction is preserved in the results.
 
 Each configuration has an adjacent standalone reference, randomized order,
 256 calibration steps, and 512 held-out steps in each of three fresh

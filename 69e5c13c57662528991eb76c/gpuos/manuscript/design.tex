@@ -147,6 +147,22 @@ a capability map, not a claim that all six layers form a finished deployed OS.}
 \label{tab:layers}
 \end{table*}
 
+\begin{figure*}[t]
+\centering
+\includegraphics[width=.94\textwidth]{01_system_architecture.pdf}
+\caption{\textbf{GPUOS system architecture.} Original artwork retained.
+The host-to-device task path, operator table, and resident executor illustrate
+the architectural control path. JIT publication and the pictured worker
+placement do not establish arbitrary hot replacement or enforced SM ownership;
+the capability boundary is given in Table~\ref{tab:layers}.}
+\label{fig:sys_arch}
+\end{figure*}
+
+Figure~\ref{fig:sys_arch} retains the original architecture diagram.
+A task descriptor identifies work and its inputs; a versioned operator entry
+identifies code. Their lifetimes must satisfy the publication and retirement
+rules below, independently of whether a backend uses a resident executor.
+
 \subsection{Processes, tasks, and leases}
 A \emph{GPU process} is the unit of ownership and accounting. Its identity
 names an address-space authority, loaded executable versions, memory
@@ -277,8 +293,22 @@ cache reuse. The compiler exports resource and progress metadata so that the
 controller can account for these costs. A maximum program count or K extent
 is a bound on work geometry, not a guaranteed number of microseconds.
 
+\begin{figure*}[t]
+\centering
+\includegraphics[width=.94\textwidth]{02_execution_storage.pdf}
+\caption{\textbf{GPUOS execution and storage contract.} Original artwork
+retained. (a) The bounded cooperative design couples retirement, ready-tile
+selection, and phase completion; stable identities retain KV/output ownership.
+(b) Intermediate regions can be reused after their last consumer, while
+request-owned KV remains reserved. The token-loop sketch describes the earlier
+bounded decode design; the qualified search measurements in Section~\ref{sec:evidence}
+use frontier-level invocations and host branch scoring.}
+\label{fig:execution}
+\end{figure*}
+
 \subsection{Fused dynamic execution}
 The earlier fused executor, called FuseOS in the retained measurements,
+uses the execution and storage contract in Figure~\ref{fig:execution}. It
 handles a different execution opportunity: changing work within a bounded
 model invocation. In output-driven search, scores determine the next live
 branch set, selected histories, and ready tiles. The model architecture alone

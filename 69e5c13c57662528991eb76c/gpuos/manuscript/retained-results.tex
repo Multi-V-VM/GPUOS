@@ -1,26 +1,31 @@
 \subsection{Complete-request benefit}
 \label{sec:request}
 
-\begin{figure*}[!tbp]
-\centering
-\includegraphics[width=\textwidth]{01_request.pdf}
-\caption{\textbf{Complete Qwen3-0.6B requests after synchronization repair.}
-Each request freshly prefills a 128-token ancestor and performs output-driven
-search with at most four branches. Bars start at zero; whiskers span three
-process medians (five requests per process). Shape-cache controls reuse all
-encountered graphs; the fixed-topology control updates configuration without
-recapture. All five methods produce the same final paths for each horizon.
-The benefit over native execution includes the fused implementation as a
-whole. Cached CLC+PDL remains a stronger executor than persistence here.}
-\label{fig:request}
-\end{figure*}
+
+\begin{table}[t]
+\centering\small
+\begin{tabular}{lrr}
+\toprule
+Executor & 32 steps (ms) & 64 steps (ms) \\
+\midrule
+Native shape cache & \res{Native32} & \res{Native64} \\
+FuseOS persistent & \res{Persistent32} & \res{Persistent64} \\
+CLC+PDL shape cache & \res{CLC32} & \res{CLC64} \\
+CLC+PDL fixed topology & \res{Fixed32} & \res{Fixed64} \\
+\bottomrule
+\end{tabular}
+\caption{Qualified complete requests: median of three process medians,
+five requests per cell. Each interval includes fresh prefill and output-driven
+search. All methods reproduce the native final paths.}
+\label{tab:requests}
+\end{table}
 
 The FuseOS executor retains an application-level benefit after the attention repair.
 For 32 search steps, the complete request takes \res{Persistent32}\,ms,
 compared with \res{Native32}\,ms for native shape-cached execution
 (\res{RequestGain32}$\times$). For 64 steps, the corresponding times are
 \res{Persistent64}\,ms and \res{Native64}\,ms
-(\res{RequestGain64}$\times$). Figure~\ref{fig:request} includes the native
+(\res{RequestGain64}$\times$). The complete-request comparison includes the native
 GPU-length graph, which keeps graph count bounded by frontier width rather
 than sequence depth. Thus the comparison is not against repeated Python
 launches or compulsory graph reconstruction.
@@ -46,18 +51,6 @@ fixed-topology differences as a universal persistent advantage.
 \subsection{Dependence on workload geometry}
 \label{sec:geometry}
 
-\begin{figure*}[!tbp]
-\centering
-\includegraphics[width=\textwidth]{02_workload_boundary.pdf}
-\caption{\textbf{Full-model equal-work search replay.} Native output-dependent
-parent/token decisions are replayed for every backend while scoring still
-executes inside timing. The interval starts from a ready prefilled ancestor;
-it is not the complete-request interval in Figure~\ref{fig:request}. Higher
-is faster; 1$\times$ is native shape-cached execution. Every point includes all
-layers, KV updates, host policy, and synchronization. Points and whiskers are
-the median and range of three round-indexed ratios.}
-\label{fig:geometry}
-\end{figure*}
 
 We next hold the search trajectory constant to remove work differences from
 the backend comparison. Three configurations vary ancestor length $P$,
@@ -66,12 +59,12 @@ $(1024,8,32)$. Each uses a native-generated, output-dependent trace. All
 qualified executors perform the same selected histories and execute the
 selection policy during timing.
 
-Figure~\ref{fig:geometry} shows that the narrow-frontier benefit does not
+The equal-work replay shows that the narrow-frontier benefit does not
 extend uniformly to wider or longer-prefix cases. Persistence improves on
 the matched tile-grid and tile+PDL implementations, but native cached
 execution becomes competitive or faster as workload geometry changes.
 Shape-cached CLC+PDL provides another strong control. Since prefix, width,
-horizon, and trajectory all change between cases, this figure defines an
+horizon, and trajectory all change between cases, this comparison defines an
 observed applicability boundary rather than identifying a single causal
 shape parameter. The maximum post-fix replay NRMSE is
 \res{MaxReplayNRMSE}; timing includes no gate-failing configuration.

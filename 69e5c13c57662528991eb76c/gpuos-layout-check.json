@@ -7,22 +7,27 @@
   "author_list_preserved": true,
   "figures": [
     {
-      "label": "fig:request",
+      "label": "fig:sys_arch",
       "number": 1,
-      "page": 8
+      "page": 4
     },
     {
-      "label": "fig:geometry",
+      "label": "fig:execution",
       "number": 2,
-      "page": 9
+      "page": 5
     }
   ],
   "figure_sha256": {
-    "01_request.pdf": "3fa7a03ad50082f8f5ff7ca8cb007b98e6940508c98ea8b42b8f43c0252c23cb",
-    "02_workload_boundary.pdf": "a04b4c960c0b340f2f064c58ece3f6addd115b706bbe4f30d22bb8ff4e2288e5"
+    "01_system_architecture.pdf": "6386d7b3fee2eac88e3ef4a65b7d94c47ff7c5a7cdf3faf90954f3e8041b91c5",
+    "02_execution_storage.pdf": "f3873c915341f4848a39150f77bd797ab5687c73fe1cf01bd13f0dcc51facaf3"
   },
-  "pdf_sha256": "857eb6956a84be9cec894574e54a4d41bbca9265039e3139f69053682bca2435",
+  "original_figure_sources": {
+    "01_system_architecture.pdf": "img/gpuos_persistent_jit_tikz.pdf",
+    "02_execution_storage.pdf": "osdi/figures/system-overview.pdf"
+  },
+  "original_artwork_byte_identical": true,
+  "pdf_sha256": "b7e930f1101a0bdb16a6cf32c1246c4868e8eccc1db8245f1655ec72c4b5ab02",
   "overfull_boxes": 0,
   "undefined_references": 0,
-  "visual_review": "All 13 pages rendered and inspected; original figure artwork retained."
+  "visual_review": "Restored diagram pages 4 and 5 rendered and inspected; original artwork unchanged."
 }
