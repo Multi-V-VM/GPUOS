@@ -1,0 +1,40 @@
+{
+  "body_pages": 12,
+  "reference_pages": 1,
+  "references_start_page": 13,
+  "figures": [
+    {
+      "label": "fig:request",
+      "number": 1,
+      "page": 8
+    },
+    {
+      "label": "fig:geometry",
+      "number": 2,
+      "page": 9
+    }
+  ],
+  "figure_sha256": {
+    "01_request.pdf": "3fa7a03ad50082f8f5ff7ca8cb007b98e6940508c98ea8b42b8f43c0252c23cb",
+    "02_workload_boundary.pdf": "a04b4c960c0b340f2f064c58ece3f6addd115b706bbe4f30d22bb8ff4e2288e5"
+  },
+  "pdf_sha256": "bf78277148c4a099e6e71830b6e0edde3db94ff68cddb6f918d76fb8041e0250",
+  "overfull_boxes": 0,
+  "undefined_references": 0,
+  "diagnostic_recomputed_from_raw": {
+    "same": {
+      "trials": 20,
+      "p50_ms": 199.91,
+      "p99_ms": 199.92967000000002,
+      "full_overlap_trials": 0
+    },
+    "different": {
+      "trials": 20,
+      "p50_ms": 1.99974,
+      "p99_ms": 2.0455286999999998,
+      "full_overlap_trials": 20
+    }
+  },
+  "visual_review": "All 13 rendered pages inspected via contact sheets; figure and table placement checked.",
+  "font_and_geometry": "Existing USENIX style, 10 pt, 7 x 9 inch text area; no layout compression overrides."
+}

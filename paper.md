@@ -1,93 +1,149 @@
-# FuseOS: Fused Persistent Execution for Dynamic Inference
+# GPUOS: An Operating-System Architecture for Shared GPU Execution
 
-This companion matches the [current IPDPS manuscript](69e5c13c57662528991eb76c/FuseOS-IPDPS-2027.pdf): **10 body pages + 1 reference page**, anonymous IEEE conference format. The contribution is a systems design for **dynamism**: changing live requests, ready work and storage lifetimes inside an admitted inference batch.
+The current [main.tex](paper/osdi/main.tex) builds a **12-page body plus one
+reference page**: [GPUOS-arXiv.pdf](paper/osdi/GPUOS-arXiv.pdf).
+It unifies the GPU-OS ideas into process/task/lease semantics, compiler safe
+points, scheduling, resource governance, admission, and hardware interfaces,
+with attribution to [Nourai and Bastani](https://arxiv.org/abs/2611.08720).
+The paper preserves the prior Figure 1 and Figure 2 and uses tables for
+additional results. [Build and source instructions](paper/osdi/README.md)
+and [claim provenance](paper/osdi/CLAIMS.md) accompany the manuscript.
 
-## Implemented design
+This is a complete architecture manuscript supported by component experiments,
+not a claim that unintegrated services are a finished general-purpose OS.
+Implementation and additional benchmark execution are paused. Completed
+RTX 5090 diagnostics and compiler checks are described within their tested
+scope; incomplete multi-process rounds are excluded from aggregate claims.
+The older evaluation PDF remains available below and in the archive.
 
-After native prefill, a cooperative persistent kernel executes every Qwen3-0.6B decoder layer and remaining greedy token. The GPU retires requests at their generation limits or actual EOS, compacts stable request IDs, assigns ready tiles, and reuses scratch at last-consumer phase boundaries. FuseOS itself uses no CUDA Graph. Conditional graphs, PDL and CLC remain strong matched controls.
+---
 
-Paired gate/up projections and vertical SiLU fusion remove a phase and a materialized tensor. The transient global plan is **12 KiB per live request**, compared with 24 KiB for separate gate/up and SiLU. Phase-local shared storage is overlaid across nonoverlapping handlers. Weights, KV, logits and residual state are outside that scratch accounting. Physical reservations stay fixed; this is not general device malloc, KV-page reclamation or continuous admission.
+## Earlier implementation and evaluation notes
 
-For trusted compatible requests, the common ready-work pool provides an alternative to separate MPS clients or instance-based placement. It does **not** provide MIG memory/fault isolation. The RTX 5090 has no measured MIG configuration.
+The previous [OSDI-format benefits and evaluation revision](paper/osdi/FuseOS-OSDI-evaluation.pdf) develops the **dynamism** motivation: changing live requests, ready work, and storage lifetimes inside a bounded inference request. The [LaTeX text](paper/osdi/evaluation.tex), [seven vector figures and reproduction instructions](paper/osdi/README.md), and [fresh numerical/timing evidence](benchmark_results/revision_20261025_osdi/README.md) are maintained together. This is an evaluation revision for the systems paper, not a completed OSDI submission.
 
-## Completed experiments
+## System objective and implemented design
 
-| Suite | Formal retained evidence | Timing boundary |
-|---|---:|---|
-| Fusion × persistent / tile+PDL / CLC+PDL and ablations | 138 cells, **1,380 requests**, 3 process rounds | Complete local request, plus decode breakdown |
-| Identical-instruction shared reservation | **120 decode trials**, 3 process rounds | Complete decode; prefill outside timing |
-| Four real MPS clients versus pooled execution | **300 four-request groups**, 3 rounds per case | Common post-prefill release through D2H/text |
-| ResNet-18 boundary case | Retained earlier complete-network suite | Full model and local request |
+### November 10 extension: slack-budgeted background execution
 
-Every primary cell has three warmups and ten timed requests. Figures report the median of three process medians and their range, not confidence intervals. Ratios are paired within a process. Frozen sources, binary hashes, input identities, numerical failures, raw records, profiler counters and checks are retained in [the new evidence directory](benchmark_results/revision_20261004_fusion).
+The [cooperative runtime](experiments/slack_scheduler/README.md) implements
+checkpointed BF16 background GEMMs, stream-ordered foreground urgency,
+per-worker issue pacing, and empirical admission under a 6% p99 budget,
+inspired by [Nourai and Bastani](https://arxiv.org/abs/2611.08720).
+It is a trusted single-process extension with manually written kernels;
+sleeping CTAs keep their residency. Hardware preemption, memory QoS,
+compiler-generated checkpoints and phase integration into the fused model
+executor remain outside this implementation.
 
-## What the fusion experiments establish
+Three independent processes per workload retain **154,368 timed foreground
+steps**, including calibration and adjacent standalone references. Selection
+uses calibration samples only; all nine selected configurations pass held-out
+validation. [Full results and raw records](benchmark_results/slack_20261110/RESULTS.md)
+include failed configurations and source/binary hashes. The new
+[LaTeX section](paper/osdi/slack-scheduling.tex) and generated table/figure are
+included in the current OSDI PDF.
 
-| Complete decode (ms) | Uniform | Ragged | Actual EOS | Long |
-|---|---:|---:|---:|---:|
-| FuseOS fused persistent | 75.7 | 78.9 | 254.0 | 210.2 |
-| Separate-MLP persistent | 96.4 | 101.6 | 327.4 | 263.5 |
-| Fused tile-grid + PDL | 86.6 | 93.0 | 305.7 | 253.8 |
-| Separate tile-grid + PDL | 101.0 | 111.9 | 376.7 | 318.8 |
-| Fused CLC + PDL | 88.1 | 98.3 | 334.4 | 287.2 |
-| Separate CLC + PDL | 86.1 | 92.6 | 303.6 | 252.6 |
+| Workload and background policy | p99 cost | Background TFLOP/s | Fraction of best custom solo |
+|---|---:|---:|---:|
+| Streaming GEMV proxy, 100-us gaps; yield q4/w64 | +0.62% | 0.741 | 6.507% |
+| Same proxy; selected yield q64/w64 | +2.50% | 1.167 | 10.213% |
+| Same proxy; no yield q4096/w64 | +23.68% | 4.359 | 38.252% |
+| Proxy, no intentional gap; selected yield q64/w64 | +3.48% | 0.374 | 3.276% |
+| Qwen3-0.6B replay; selected yield q64/w64 | −3.04% | 0.039 | 0.342% |
+| Qwen3-0.6B replay; no yield q4096/w64 | −1.57% | 8.779 | 76.999% |
 
-Allowing the launch controls either MLP variant, their best within-process latency divided by FuseOS has median **1.139, 1.173, 1.194 and 1.198**. All matched controls produce bitwise-identical custom tokens and logits. Fusion can lose under CLC+PDL, so the evidence supports choosing fusion and execution together, not a universal fusion speedup.
+Values are medians of paired process ratios; ranges are in the full table.
+`q` denotes K tiles per warp between checkpoints and `w` denotes CTAs, not
+reserved SMs. The denominator is the fastest measured **custom GEMM** solo
+configuration, not GPU peak. Negative costs are observations under unlocked
+clocks, not claimed scheduler-induced speedups. Whole-step suspension protects
+the streaming workload but leaves almost no useful background progress on
+this Qwen workload; ordinary co-running is a stronger performance control there.
 
-The most discriminating controls are:
+Qwen uses all 28 native layers plus the vocabulary head with cached graphs,
+P128, up to four branches, and a fixed 32-step native search trace. Prefill,
+capture, allocation, and search scoring are excluded. Final-replay logits
+match the native reference bitwise. Bounded worker runs pass memcheck,
+racecheck and synccheck, while an initial live-worker sanitizer attempt stalled;
+these checks do not certify the full concurrent runtime. Separate flag-to-ack
+p99 probes measure 10.69/21.85/738.68 us for q4/q64/q4096. This is not a
+reproduction of OpenInfer's Kimi, FP8, green-context, MPS, or multi-GPU results.
 
-- Independent static shared arrays slow Uniform/Ragged to **106.9/116.0 ms**. The overlay implementation uses 21,856 rather than 36,704 shared bytes per block and changes compiler register allocation.
-- Increasing only the launch-time reservation of the **same device instructions** to the larger footprint leaves Uniform/Ragged at **75.59/78.75 ms**, versus **75.60/78.75 ms** originally. SASS identity is verified. Extra shared capacity alone therefore does not explain the slower separate-array build.
-- Actual active warps are about **16.7%** for all three profiled variants, and DRAM read traffic is similar. Generated execution and some L2 traffic differ; no complete single-counter explanation is claimed.
-- A one-time fixed global region plan matches per-token rebuilding, with the same reuse and active work. Ragged region assignments drop from 62 to 2; latency is essentially unchanged.
-- Cyclic claiming is slightly faster than atomic claiming on the tested dense tiles. Both use dynamic active sets and work bounds.
+### Existing dynamic inference executor
 
-Selected fused decodes pass **memcheck and synccheck**. Additional tests pass for odd contexts, unequal retirement, fixed/rebuilt plans, exhausted arenas with untouched guards, and rejection of oversized cooperative grids. Profiler timings are not performance samples.
+In output-driven search, model scores determine which branches survive, which histories are copied, and the next frontier's active width. A fixed model architecture therefore does not determine the runtime's execution plan. FuseOS combines bounded storage plans, fused operator handlers, and GPU work assignment to execute this changing workload.
 
-## Real MPS comparison
+The Qwen3-0.6B implementation keeps immutable ancestor KV and two private-history banks. Each frontier copies selected histories into the alternate bank, appends KV, and swaps banks. Physical capacity stays reserved while branch identities and active work bounds change. The persistent executor runs all 28 decoder layers and the vocabulary head in one cooperative launch **per frontier**. GPU counters assign ready tiles within a phase; barriers order dependent phases. Host branch scoring and metadata publication remain inside complete-request timing.
 
-The four MPS processes share model weights through CUDA IPC, have private KV/scratch, and restore the same native prefill checkpoint as the pooled controls. All outputs/logits match bitwise. MPS server client lists are retained. A 25% active-thread cap is a soft provisioning control, not a MIG simulation.
+The FuseOS persistent path uses no CUDA graph. Matched tile-grid, PDL, and CLC executors reuse the fused handlers; cached graphs are retained as strong competing implementations. This separates the benefit of the fused implementation from the incremental value of its execution protocol.
 
-| Post-prefill group makespan (ms) | Ragged | Actual EOS |
+## Real complete-request benefit
+
+The current headline uses fresh measurements after repairing the inherited attention warp-ordering hazard. Three independent processes each run five timed requests per cell, with unchanged native numerical gates. The request freshly prefills a 128-token ancestor and performs output-dependent search with at most four live branches.
+
+| Executor | 32 search steps (ms) | 64 search steps (ms) |
 |---|---:|---:|
-| FuseOS pooled persistent | 79.0 | 254.9 |
-| Pooled CLC + PDL | 105.3 | 412.9 |
-| Four MPS tile + PDL clients | 119.6 | 332.4 |
-| Four MPS CLC + PDL clients | 115.0 | 353.5 |
-| Four capped MPS CLC + PDL clients | 124.0 | 415.0 |
+| Native shape-cached graphs | 143.293 | 274.924 |
+| FuseOS persistent | **117.889** | **225.005** |
+| Matched CLC+PDL, shape-cached | 113.184 | 215.208 |
+| Matched CLC+PDL, fixed-topology graph | 121.330 | 231.966 |
 
-The paired ratios against MPS CLC on Ragged and MPS tile on EOS are **1.455× and 1.307×**. EOS pooled persistence varies from **254.4 to 336.8 ms** across process medians; one round is slower than MPS tile. Pooled CLC also varies substantially. The paper retains these ranges and makes no sustained-service or tail-latency guarantee. Startup, checkpoint restore and prefill are outside this sharing interval; it is distinct from the full-request benchmark.
+FuseOS reduces median complete-request latency by **17.7% and 18.2%** relative to native shape-cached execution, or **1.215× and 1.222×** speedup. These are ratios of the median process latencies. All methods produce the same final candidate paths. Maximum recorded full-vocabulary NRMSE is **0.007762**, below the unchanged 0.01 gate; the cosine threshold remains 0.999.
 
-## Native model compatibility and end-to-end performance
+![Complete-request latency](paper/osdi/figures/01_request.png)
 
-Native reference generation agrees with Hugging Face. All new BF16 paths use FP32 GEMM accumulation; framework reduced-precision BF16 reductions are disabled. Operator-local diagnostics resolved a substantial accumulation mismatch, but the full-model gate remains mixed.
+The interval includes fresh prefill, ancestor-KV publication, all model layers and search frontiers, branch policy, private-history copies, final D2H/text decoding, and synchronization. Weights, tokenized inputs, executor buffers, and graph caches are resident. Stage medians are not added to construct this interval. Whiskers show the minimum and maximum of three process medians; they are not confidence intervals or request-tail percentiles.
 
-| Qwen case | Native graph request | FuseOS request | Same-prefix NRMSE | Free greedy agreement | Gate |
-|---|---:|---:|---:|---:|---|
-| Single | 235.7 ms | 184.1 ms | 0.934% | 100% | Pass |
-| Uniform | 131.8 ms | 92.1 ms | 1.073% | 84.4% | Fail |
-| Ragged | 145.8 ms | 96.0 ms | 1.011% | 93.8% | Fail |
-| Actual EOS | 455.2 ms | 275.3 ms | 1.181% | 58.2% | Fail |
-| Long | 366.8 ms | 239.4 ms | 0.965% | 95.2% | Pass |
-| Skew-8 | 315.2 ms | 186.4 ms | 1.191% | 73.8% | Fail |
+The positive application result belongs to the complete fused dynamic executor. Cached CLC+PDL remains faster than persistence with the same handlers, so these results do not attribute the entire improvement to persistent scheduling. They also show why a graph baseline must be allowed to reuse previously encountered shapes.
 
-The fixed gate is finite logits, NRMSE ≤ 1%, cosine ≥ 0.999, using the same reference prefixes. Failed cases do not support accuracy-equivalent native speedups. Long passes the logit gate but does not reproduce every greedy token. Actual EOS lengths differ between native (2/7/31/94) and custom (2/9/31/95), so their native timing workloads also differ. **Single is the strongest qualified native application comparison**.
+## Where the benefit changes
 
-ResNet-18 remains a complete-network boundary case: only eight residual add–ReLU operations are resident, with convolutions in the framework. At B32, native graph model time is **2.534 ms**, vector graph **2.536 ms**, and resident-32 **3.273 ms**. All numerical/top-1 checks pass. Partial persistence leaves coordination costs and does not establish a whole-network speedup. Batches replicate one processed photograph.
+A separate equal-work full-model replay holds native-generated parent/token choices constant while every backend still executes scoring. It starts from a ready prefilled ancestor and therefore has a different timing boundary from the complete requests above.
 
-## Relationship to prior persistent systems
+![Workload-dependent full-model benefit](paper/osdi/figures/02_workload_boundary.png)
 
-MPK already supports device-side retirement, continuous batching, paged KV management and shared-memory pages. FuseOS does not claim these general capabilities as new. Its narrower design uses implicit phase tasks, one compacted active map and last-consumer overlay, trading task queues and cross-phase pipelining for cooperative barriers. The paper compares mechanisms explicitly. A source compatibility probe of public MPK revision `60ae655` rejects CC 120 in its resource helper, and its linear dispatch excludes that architecture. This is not a full MPK build or timing result. No MPK or Meld latency is inferred from another GPU or model.
+The narrow case P128/B4/H32 favors the fused persistent implementation over native cached execution. P512/B16/H16 and P1024/B8/H32 do not retain that advantage, although persistence remains faster than the matched tile-grid and tile+PDL paths. All three replay cases pass the original numerical gate; maximum NRMSE is 0.008308. These configurations change several workload dimensions together and establish an observed applicability boundary, not a causal threshold for any one dimension.
 
-## What to refer to in Meld
+## Allocation, fusion, and cross-SM transport
 
+To distinguish runtime benefit from an imbalanced starting schedule, the [post-fix split-KV controls](benchmark_results/revision_20261025_cooperation/RESULTS.md) independently vary placement, task partitioning, phase fusion, and transport. ShareGPT supplies prompt lengths; Q/K/V are seeded BF16 tensors. These are attention-operator controls, not end-to-end ShareGPT serving.
 
-The supplied [3830418.3843857.pdf](3830418.3843857.pdf) is *Taming Dynamism on GPUs: Cross-SM Kernel Fusion via SM Cooperation and Just-in-Time Reduction*, DOI [10.1145/3830418.3843857](https://doi.org/10.1145/3830418.3843857).
+![Placement, partitioning, and phase fusion](paper/osdi/figures/03_mechanisms.png)
 
-Useful connections are computation/scheduling separation (§4.1), skew-aware work distribution (§4.3), reusable execution wrappers and planning amortization (§4.4), and resource/synchronization contracts (§5). Meld itself uses a persistent GPU wrapper. FuseOS therefore does not claim “persistent kernels instead of Meld” as a novelty distinction. Its present design uses global-memory intermediates and GPU-wide phases; it does not implement Meld's topology-aware cooperation, remote shared-memory transport or just-in-time reduction. Just-in-time reduction is also different from NVRTC compilation.
+Across nine prompt-length batches, replacing round-robin placement with LPT for identical 512-key jobs yields **1.234×** geometric-mean speedup, up to **1.925×**. Repartitioning an already sorted ordinary grid from four parts into 128-key jobs yields **1.843×**, up to **3.988×**. Both exploit input lengths known before dispatch. The latter also changes reduction partitioning.
 
-## TMA, figures and reproducibility
+With task geometry and compiled resources held constant, matched CLC phase fusion yields **0.994×** geometrically. Thus the large partitioning improvement cannot be presented as a persistent-fusion gain, and the separate ratios cannot be multiplied. This gives a concrete design requirement: a runtime must first expose enough well-sized ready work; removing a launch is valuable only if completion, resource, and duplicated-work costs permit it.
 
-TMA is a separate optional staging experiment and is compressed in the main paper. Its worker-local gains are not multiplied into Qwen or ResNet results. Original attention/MPS/MIG illustrations remain unchanged in the [original-figure comparison PDF](69e5c13c57662528991eb76c/FuseOS-original-figures.pdf); they are not new empirical evidence. The original four image hashes are checked by the paper build.
+![Worker-budget sensitivity](paper/osdi/figures/05_worker_budget.png)
 
-Use [the fusion experiment README](experiments/fusion_persistent/README.md) for commands and [paper build instructions](69e5c13c57662528991eb76c/README.md) for the template. Repeated AI-drafting footnotes are absent; required affected-section citations and the acknowledgment remain. The older paper and evidence are preserved under `build/pre_fusion` and the earlier result directories.
+For B128/trace 1 with identical 512-key jobs, increasing the persistent budget from 170 to 680 CTAs improves staged LPT from 206.61 to 141.16 µs. Fused LPT takes 215.40 to 142.20 µs; the sorted grid stays around 137 µs. More workers help scheduling but do not make phase fusion profitable in this case.
+
+![Matched transport and memory counters](paper/osdi/figures/04_transport.png)
+
+Four-CTA TMA exchange yields **1.008×** geometric-mean speedup over matched global-memory exchange. A separate counter diagnostic observes lower L2 traffic but similar DRAM reads. It is a synchronized cluster-state exchange, not migration of a live CTA's registers/program counter and not a reproduction of Meld's asynchronous pipeline. Meld already includes input-aware scheduling; this experiment does not show that all of Meld's benefit is an allocation bug.
+
+## Larger-model boundary
+
+The [Qwen3.5-35B-A3B port](benchmark_results/revision_20261024_fuse35/RESULTS.md) runs custom routed-MoE handlers for microbatches 1–8 across all 40 routed layers and a decode path for 30 DeltaNet layers. Attention, prefill, shared experts, and dense projections remain native. The B16 ragged case has 26.47% custom-MoE token-layer coverage; the other five cases have 100% eligible coverage.
+
+![Complete 35B requests](paper/osdi/figures/06_qwen35.png)
+
+The default three-stage persistent path does not beat native eager across the six evaluated workloads. Native/persistent ratios of median latency range from 0.909× to 0.980×. All 9,792 recorded frontier comparisons have zero NRMSE against the native mixed-Q4 model, and all 108 free-path comparisons match. This is a measured performance boundary of a numerically compatible port.
+
+![Selective fusion ablation](paper/osdi/figures/07_fusion_boundary.png)
+
+Separating hidden quantization, down projection, and expert reduction while retaining persistent scheduling reduces the tree request from 721.11 to 682.92 ms and the ragged request from 554.12 to 547.39 ms. The former is close to native's 688.90 ms but does not establish a robust win across runs. The profiler records fewer launches but more custom-MoE GPU time with three stages. The two-case ablation supports choosing fusion boundaries by duplicated work and available parallelism, rather than minimizing kernel count alone.
+
+## Contribution supported by this revision
+
+FuseOS provides a concrete dynamic execution path that improves complete small-Qwen search requests under narrow-frontier workloads while preserving the measured native numerical contract and final paths. The experiments identify known-input work partitioning as a prerequisite and expose the limits of additional phase fusion and transport optimizations.
+
+Persistent execution alone is not novel: [MPK](https://www.usenix.org/conference/osdi26/presentation/cheng) already supplies a persistent compiler/runtime, and [Meld](https://doi.org/10.1145/3830418.3843857) combines input-aware scheduling with cross-SM cooperation. A stronger distinct contribution requires demonstrating an advantage when ready work or storage liveness becomes known during execution, against competitors with the same prior information. The current evidence does not establish general allocation, continuous admission, or replacement of MIG's isolation. Historical unqualified MPS measurements are not used for the present application claim. Bounded model search is also separate from tool-using agent success or ShareGPT service throughput.
+
+## Evidence and historical versions
+
+The [current evidence record](benchmark_results/revision_20261025_osdi/README.md) contains 150 fresh complete requests and 315 equal-work replay timings, lifecycle checks, source/binary hashes, and sanitizer logs. The repaired ordered-attention path passes racecheck; selected full-model frame kernels pass memcheck and synccheck. These checks have explicit filters and do not certify all kernels in the framework.
+
+The [previous Markdown manuscript](paper/osdi/data/paper_pre_osdi_20261025.md), [frozen IPDPS PDF](69e5c13c57662528991eb76c/FuseOS-IPDPS-2027.pdf), and [original-figure comparison](69e5c13c57662528991eb76c/FuseOS-original-figures.pdf) remain preserved. Earlier attention-based snapshots predate the warp-ordering repair and require requalification before reuse; the new figures use fresh accepted data or the separately qualified 35B path. Historical ResNet and other operator experiments remain linked from the original manuscript and repository README rather than being presented as newly rerun results.
+
+AI-assisted tools were used for code edits, experiment orchestration, prose revision, and plotting. The current revision retains raw observations and reproducible transformations for author review.

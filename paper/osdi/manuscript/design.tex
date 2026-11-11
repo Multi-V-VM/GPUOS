@@ -1,0 +1,326 @@
+\section{Introduction}
+\label{sec:intro}
+The useful unit of GPU ownership is rarely an entire device for the entire
+lifetime of an application. A model server needs a prompt response at some
+moments, a large KV allocation at others, and sustained memory throughput
+during decode. An adapter update or an evaluation job may tolerate interruption
+while consuming the arithmetic capacity that the server leaves available.
+Assigning the same indivisible device to either application hides these
+differences. Sharing the device without controlling interference can be worse:
+a throughput improvement is not useful if an interactive request misses its
+response-time objective.
+
+Nourai and Bastani's \emph{The GPU Needs an Operating System} makes this case
+through large-model measurements and a hardware--software research agenda
+\cite{Nourai2026GPUOS}. We adopt its central organizing idea: GPU resources
+should be granted according to the urgent workload's remaining slack, rather
+than treating low average utilization as unconditional permission to run more
+work. We develop that idea into an architectural specification for \system{},
+covering process state, resource contracts, compiler checkpoints, admission,
+revocation, memory leases, and the hardware interface. This is a system-design
+paper supported by component experiments. The architecture includes services
+that the current prototype does not yet implement; the implementation and
+evaluation identify that boundary explicitly.
+
+The resulting abstraction is a \emph{resource lease attached to restartable
+work}. A lease specifies which resources a task may consume, how its progress
+is committed, and how much revocation delay admission must reserve. A task can
+run in a fused device executor, as a sequence of compiler-generated kernel
+slices, or in a separate protected CUDA context. These are execution backends
+with different costs and guarantees, not interchangeable meanings of
+preemption. The architecture chooses among them using a workload-specific
+cost model and preserves one accounting interface across the alternatives.
+
+The prototype results expose limits as well as opportunities. Qualified
+fused search improves on native cached execution, but matched CLC+PDL
+remains faster. Cooperative sharing benefits a streaming proxy, while
+whole-step suspension yields little work beside full-model replay.
+The OS must therefore be able to reject an elaborate scheduling path
+when ordinary co-running is better.
+
+Our contribution is an explicit architectural specification, an execution
+contract separating checkpoint safety from resource return, and component
+evidence for bounded implementations. The resource-vector and slack-driven
+sharing ideas originate in the cited work; new hardware services and a
+completed general-purpose implementation are not claimed.
+
+\section{Why GPU Sharing Needs an OS Contract}
+\label{sec:motivation}
+\subsection{Decode and the roofline}
+Consider a matrix with $W$ weights, represented by $s$ bytes per weight, and
+a decode batch of $B$ tokens. A weight-only approximation performs $2BW$
+floating-point operations while reading $sW$ bytes. Its arithmetic intensity
+is therefore
+\begin{equation}
+ I_{\mathrm{weights}} = \frac{2B}{s}\quad\text{FLOP/byte}.
+\end{equation}
+For two-byte weights this is $B$; for one-byte weights it is $2B$. KV reads,
+activation traffic, routing, and synchronization add costs that the expression
+does not capture. The device ridge $R=F_{\mathrm{peak}}/\beta_{\mathrm{mem}}$
+compares peak arithmetic throughput and memory bandwidth at a consistent
+precision. A memory-bound operation has an idealized arithmetic-utilization
+bound $\min(1,I/R)$. A low value is a structural property of the operation,
+not evidence that a dispatch queue was implemented poorly.
+
+For a mixture-of-experts layer, the relevant batch is the batch reaching one
+expert. Under balanced routing, $E$ experts and $k$ active experts per token
+give an average $B_e=Bk/E$. A large global batch can consequently remain a
+small local matrix problem. Routing imbalance makes the average a poor
+description of the tail. This matters for an OS: scheduling against the
+global token count can overestimate the arithmetic reuse of each ready task,
+while the latest-finishing expert determines when dependent work is released.
+
+\paragraph{Evidence motivating the design.}
+OpenInfer reports roughly 7\% tensor activity for Qwen3.5-397B at a
+97.2\% deadline-attainment operating point on four RTX PRO 6000 cards,
+and 2.9\% in its decode-only pool~\cite{Nourai2026GPUOS}. Its Kimi K2
+experiments report 6--11\% activity at carried loads. These are that paper's
+serving measurements, not our RTX 5090 observations. Its streaming control
+reaches approximately 99\% of measured bandwidth on 24 of 188 SMs, whereas
+its foreground reaches only about half of peak bandwidth. This contrast
+motivates jointly choosing a foreground kernel and its allocation.
+
+\subsection{Why a scheduler alone is insufficient}
+Batching can increase reuse, but waiting for a larger batch consumes response
+time and larger steps can increase token latency. A scheduler cannot remove
+that tradeoff by rearranging identical non-preemptible kernels. It needs
+additional work that is both useful and compatible with the urgent phase.
+Compatibility depends on more than arithmetic intensity: a cache-resident
+matrix loop and an operand-streaming GEMM may issue similar tensor work while
+causing very different foreground interference.
+
+Nor can the scheduler infer available SMs from low bandwidth utilization.
+A poorly sized foreground kernel may need many SMs to generate enough
+outstanding memory requests. Taking those SMs away reduces the foreground's
+own throughput before the background transfers a single byte. Conversely,
+a well-pipelined streaming kernel may saturate bandwidth with fewer workers.
+The resource cost of a partition therefore has two parts: the foreground's
+loss from a smaller execution allocation and additional interference from
+the admitted background workload. The architecture measures these parts
+separately whenever a suitable matched control exists.
+
+\subsection{Time, space, and authority}
+CUDA stream priorities influence scheduling but do not promise to interrupt
+already-running work~\cite{CUDAStreams}. Green contexts constrain spatial
+execution resources; MPS coordinates multiple clients; MIG provides a
+different isolation boundary on supported devices~\cite{CUDAGreen,NVIDIAMPS}.
+None should be described as a software-selected, instruction-level deadline
+primitive merely because it changes latency in one workload. Hardware
+context switching, compiler checkpoints, and static partitions address
+different parts of the problem.
+
+We distinguish three authorities. An application can state urgency and
+declare its work. A runtime can admit or withhold future slices and manage
+buffers it owns. A driver or device can enforce context and physical-resource
+boundaries. The proposed OS API exposes the strongest available guarantee
+without silently upgrading it. In particular, a software issue-rate limit is
+not a memory-controller reservation, and a CTA launch limit is not a promise
+that a particular set of SMs belongs exclusively to that client.
+
+\section{System Architecture and Objects}
+\label{sec:architecture}
+\subsection{A six-layer decomposition}
+We retain the source paper's six-layer decomposition as a design vocabulary
+\cite{Nourai2026GPUOS}. L0 provides device signals, context scheduling,
+queues, and enforceable resource controls. L1 defines the obligations of a
+shareable kernel. L2 dispatches eligible work to execution resources. L3
+governs resource consumption and memory capacity. L4 estimates interference
+and revocation costs. L5 selects admissions within foreground slack.
+Table~\ref{tab:layers} maps this specification to the current artifact.
+
+\begin{table*}[t]
+\centering\small
+\begin{tabular}{p{.10\textwidth}p{.38\textwidth}p{.43\textwidth}}
+\toprule
+Layer & Architectural responsibility & Artifact boundary \\
+\midrule
+L0 & Context switch, bounded pause, resource enforcement & Existing driver switching is measured; no new device pause or memory-QoS interface. \\
+L1 & Restartable work and declared resource footprint & Handwritten WMMA checkpoints and strict FX/Triton slices for supported tensor graphs. \\
+L2 & Ready-work selection and dispatch & Fused per-frontier device work pool, stream-ordered worker control, and a separate host slice executor. \\
+L3 & Capacity leases, issue pacing, cache/copy governance & Bounded arenas and CTA issue pacing; no physical cache or DRAM reservation. \\
+L4 & Workload-specific interference and revoke-cost estimates & Measured configuration lookup; no predictor for unobserved workloads. \\
+L5 & Deadline-aware admission and revocation & Held-out slack selection and one-foreground IPC admission; no integrated production service controller. \\
+\bottomrule
+\end{tabular}
+\caption{Architectural specification and implemented evidence. The table is
+a capability map, not a claim that all six layers form a finished deployed OS.}
+\label{tab:layers}
+\end{table*}
+
+\subsection{Processes, tasks, and leases}
+A \emph{GPU process} is the unit of ownership and accounting. Its identity
+names an address-space authority, loaded executable versions, memory
+allocations, and outstanding tasks. Trusted tasks may share one CUDA context
+and even one fused executor; mutually untrusted tasks require a protection
+boundary supplied below the runtime. The API makes this trust mode explicit
+rather than treating a common function-pointer table as process isolation.
+
+A \emph{task} names executable work and its dependency edges. Its descriptor
+contains a code version, tensor views, input/output access modes, a progress
+format, a resource declaration, and a deadline class. A \emph{slice} is a
+bounded portion of that task with one well-defined commit boundary. A
+\emph{lease} grants resources to one or more eligible slices for a bounded
+interval. A lease also specifies what must happen on revocation: retain a
+resident allocation, drain and return CTA resources, save to device memory,
+or invoke a driver-managed context transition.
+
+\subsection{Resource vectors and accounting}
+The proposed lease resource vector is
+\begin{equation}
+ \mathbf r=(r_{\mathrm{SM}},r_{\mathrm{TC}},r_{\mathrm{L2}},r_{\mathrm{DRAM}},
+ r_{\mathrm{cap}},r_{\mathrm{link}},r_{\mathrm{copy}},r_{\mathrm{power}}).
+\end{equation}
+The coordinates have different units. SM allocation concerns resident
+blocks, warp issue, registers, and shared memory. Tensor work concerns
+arithmetic issue. Cache and DRAM budgets concern traffic and queueing.
+Capacity is bytes held over time plus the cost of reclaiming them. Link and
+copy resources include direction and endpoint. Power affects clock rates
+shared by otherwise disjoint work. A scalar utilization percentage cannot
+substitute for this vector.
+
+Declarations and measurements serve different purposes. A compiler can
+report the logical inputs and scratch required by a slice, along with the
+compiled register and shared-memory allocation. It cannot derive physical
+DRAM traffic exactly from those fields because cache hits, reuse, and other
+clients alter that traffic. The accounting service keeps both values, with
+explicit labels. If a counter is unavailable, it remains unknown; it is not
+filled with an arithmetic estimate and presented as a measurement.
+
+Resource prices are foreground costs, not universal exchange rates. For
+foreground class $f$, background declaration $\mathbf r$, and execution
+state $x$, write $C_f(\mathbf r,x)$ for the additional completion time. The
+state includes phase, batch geometry, context length, device allocation,
+and recent interference. Even if individual resource effects are measurable,
+their combination need not be additive. Cache eviction can increase DRAM
+traffic, and a power change can alter the service time of every slice.
+The implemented lookup does not assume a linear price model; a more general
+predictor must be validated on resource combinations before admission uses it.
+
+\subsection{Events and executable versions}
+The architecture uses release/acquire publication between producers and
+consumers in the appropriate memory domain. A producer publishes the data
+and progress state before publishing completion. A consumer observes the
+completion event before reading those fields. A host-mapped doorbell requires
+system-scope ordering; a flag used only between kernels on the device can use
+device scope. Polling a volatile field without a publication protocol is not
+a replacement for these ordering rules.
+
+Executable versions have lifetimes too. Hot-loaded code, device function
+pointers, and plan descriptors remain valid until every possible caller has
+retired. Replacing a jump-table entry does not prove that the old module is
+unreachable by a CTA that already loaded its pointer. The specification
+therefore associates a code epoch with each admitted task and reclaims an
+old version only after an epoch-completion condition. The existing fused
+executor uses precompiled handlers; general safe hot replacement remains
+an architectural service rather than a property established by these tests.
+
+\section{Compiler Contract and Execution Backends}
+\label{sec:compiler}
+\subsection{Safe points are semantic boundaries}
+A compiler cannot make an arbitrary running GPU kernel safely restartable
+by inserting a flag read at an arbitrary instruction. Threads may disagree
+about which barrier phase they are in; shared memory may hold an unpublished
+partial result; or an external consumer may have observed an output that
+the resumed task would produce again. A checkpoint is legal only when its
+progress and externally visible effects define an unambiguous restart state.
+This requirement is stronger than limiting the number of loop iterations.
+
+For a pure pointwise tile, a commit can consist of final stores to a disjoint
+output region. For a matrix product, a commit may consist of a partial
+accumulator and the completed K extent. A reduction similarly needs its
+partial value and reduction interval. The next invocation consumes exactly
+that state. The task's output becomes visible to dependent graph nodes only
+after all required tiles have committed. Intermediate numerical state may
+remain private even when some task-local work is complete.
+
+The proposed general contract admits opaque kernels only if their provider
+supplies equivalent safe-point semantics or an acceptable non-preemptible
+bound. Unsupported side effects, device allocation, inter-block protocols,
+or external collectives cannot be assumed safe merely because the front end
+can capture their call site. Rejecting a graph is a valid compiler result.
+A silent eager fallback would violate the scheduler's assumed pause contract
+and is therefore inappropriate for this backend.
+
+\subsection{Implemented FX-to-Triton lowering}
+The current front end captures shape-specialized, pure inference graphs with
+FX and also exposes a \texttt{torch.compile} backend~\cite{Reed2022FX}.
+It lowers supported operations to Triton kernels and generated pointwise
+expressions~\cite{Tillet2019Triton}. It accepts floating CUDA tensors with
+checked shape, stride, dtype, and device specializations. Supported graphs
+include broadcast arithmetic, common activations, two-dimensional matrix
+products and linear layers, contiguous last-dimension sums and means,
+bounded-row softmax, and selected no-copy views. Autograd, mutation,
+unrecognized operations, and unsupported semantic options are rejected.
+
+The compiler generates a sequence of stages rather than forcing every graph
+into a persistent megakernel. Each stage specifies its number of independent
+program instances, its reduction chunks, output storage, and any private
+partial storage. A matrix-product slice covers a bounded set of output tiles
+and a bounded K interval, accumulating in FP32. A sum or mean saves FP32
+partials between reduction chunks. An elementwise stage maps a bounded
+range of logical elements through broadcasting and physical strides. A
+softmax row currently executes as one program and is limited to 8192 elements.
+
+The execution cursor identifies the stage, program offset, and reduction
+chunk. It lives in the host executor; partial arithmetic state lives in
+device allocations. The executor advances through all program ranges of a
+chunk before advancing the chunk, allowing successive grants to change
+their program counts without skipping or duplicating output tiles. The
+same stream orders those grants. Resuming on another stream requires an
+explicit handoff; the prototype rejects an unordered stream change.
+
+Every slice is a finite kernel launch. Once that launch completes, its CTA
+resources are returned to the CUDA scheduler. This is the important semantic
+difference from a resident worker that sleeps. The cost is additional launch
+and synchronization work, more partial-state traffic, and possibly worse
+cache reuse. The compiler exports resource and progress metadata so that the
+controller can account for these costs. A maximum program count or K extent
+is a bound on work geometry, not a guaranteed number of microseconds.
+
+\subsection{Fused dynamic execution}
+The earlier fused executor, called FuseOS in the retained measurements,
+handles a different execution opportunity: changing work within a bounded
+model invocation. In output-driven search, scores determine the next live
+branch set, selected histories, and ready tiles. The model architecture alone
+does not fix those choices. Stable request identifiers and bounded storage
+plans separate changing logical ownership from physical reservations.
+
+The evaluated Qwen3-0.6B path stores an immutable ancestor KV region and two
+private-history banks. Each frontier copies selected histories into the
+alternate bank, appends KV, and swaps banks. Precompiled handlers combine
+normalization and projection, gate/up and activation, and residual work.
+A cooperative persistent invocation executes all 28 layers and the vocabulary
+head for one frontier. Device work counters assign ready tiles within a
+phase; barriers order dependent phases. Host branch scoring remains part of
+the complete-request measurement. This is not a process-lifetime serving
+kernel with a GPU-owned external request queue.
+
+The same arithmetic handlers support ordinary grids, programmatic dependent
+launch, and cluster launch control. Shape-specific graphs cache encountered
+widths and depths. A fixed-topology control accepts an updated device
+configuration without recapture. These controls matter architecturally:
+the OS must preserve good fused arithmetic and plan reuse even when it
+selects an execution backend other than persistence. It must not create an
+artificially weak graph baseline to justify a resident runtime.
+
+\paragraph{A process-lifetime resident service.}
+The architecture also permits a resident executor to accept requests from
+a host-visible ring, perform sampling and stopping decisions on the device,
+and publish tokens through an output ring. This is the process-lifetime
+execution model demonstrated for Llama-3.1-8B by OpenInfer, which also
+assigns selected CTAs background roles at phase boundaries
+\cite{Nourai2026GPUOS}. Such a service needs request-slot generations,
+backpressure, cancellation, and a rule for retiring every output consumer.
+A full ring must stop admissions without blocking token delivery for accepted
+requests. A cancelled request retires only after its current phase commits
+and references to its KV are released. Our frontier-level executor provides
+bounded model execution but does not implement this complete service loop.
+
+\subsection{Three meanings of suspension}
+\system{} assigns an explicit suspension mode to a backend. A resident
+cooperative worker saves progress and stops useful issue while retaining its
+CTA allocation. A finite sliced backend commits and returns from the kernel,
+releasing CTA allocation before resumption. A separate-context backend relies
+on driver-managed switching, whose saved physical execution state is opaque
+to the application. All can preserve logical task progress, but only the
+second exposes an application-controlled kernel boundary with resource return.

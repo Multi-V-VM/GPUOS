@@ -1,0 +1,208 @@
+\section{Slack Admission, Dispatch, and Revocation}
+\label{sec:control}
+\subsection{Slack is a budget with a scope}
+An urgent request has a release time, a completion objective, and a current
+estimate of its remaining service demand. The architecture distinguishes
+first-token latency, per-step latency, and whole-request completion: satisfying
+one does not prove the others. A background admission spends only slack
+defined at the same boundary as the controller's latency observations.
+Speculative tokens, variable search width, and prefill/decode transitions
+require the controller to change its foreground class or invalidate the
+corresponding calibration.
+
+For the measured sharing experiment, the objective is a step deadline
+$D_f=1.06\,Q_{.99}(T_f^{\mathrm{solo}})$. The controller reports both
+$Q_{.99}(T_f^{\mathrm{co}})/Q_{.99}(T_f^{\mathrm{solo}})-1$ and deadline
+attainment, the fraction of observed steps no longer than $D_f$. These are
+different statistics. Passing a p99 ratio test does not establish that every
+step met its deadline; observing a finite sample with no misses does not
+establish a deterministic deadline guarantee.
+
+The intended admission problem is to choose background utility subject to
+foreground and resource constraints:
+\begin{equation}
+ \max_{\mathcal A,\mathbf r}\; U(\mathcal A,\mathbf r)
+ \quad\text{s.t.}\quad
+ \widehat T_f+\widehat C_f(\mathcal A,\mathbf r)+G_f\leq D_f.
+\end{equation}
+Here $\mathcal A$ is the admitted task set, $\widehat C_f$ includes predicted
+interference, and $G_f$ reserves revocation and uncertainty margins. Capacity,
+execution-resource, and protection constraints apply independently. Utility
+can value completed work, throughput, or application priority. A scalar
+FLOP count is appropriate only when comparing work whose output and precision
+make that count meaningful.
+
+This formulation does not imply that a useful global optimizer is already
+available. The implemented policy uses a measured table for a known workload.
+Among numerically qualified cooperative configurations whose calibration
+p99 meets the budget, it chooses the highest measured background rate.
+Unknown configurations are not admitted by extrapolation. Selection is
+frozen before held-out samples are collected. If a selected window fails,
+the controller revokes background admission for a later window; it cannot
+repair a deadline already missed. The experiment tests this narrow selection
+rule, not prediction under arbitrary future workload shifts.
+
+\subsection{The cost model must include the foreground}
+A useful cost table records an allocation-only baseline in addition to a
+co-run result. Suppose a foreground loses $a$ units of latency when its
+worker allocation shrinks, even with no background arithmetic. If a co-run
+then loses $a+b$, attributing all $a+b$ to memory contention misdiagnoses the
+problem. Conversely, assigning a separate SM subset does not remove shared
+cache, DRAM, power, or interconnect effects, so attributing the entire change
+to lost SMs is also unjustified.
+
+\subsection{Dispatch and safe revocation}
+The lease lifecycle is \emph{prepared}, \emph{eligible}, \emph{running},
+\emph{revoking}, \emph{checkpointed}, and finally \emph{retired}. Preparation
+verifies tensor views, code versions, resource declarations, and storage
+availability. Eligibility requires predecessor completion and a valid grant.
+Revocation prevents new grants, requests a safe point from already-running
+work, and waits for the specified acknowledgement. Retirement is separate:
+it also requires that downstream users release the task's state and outputs.
+
+A revocation acknowledgement means that the advertised restart state is
+committed and that the promised resources have been returned. It must not
+mean merely that one thread read an urgent flag. A resident worker can only
+acknowledge its weaker contract: arithmetic issue has stopped, while its
+CTA allocation remains. A finite-slice backend acknowledges after its CUDA
+stream confirms completion. The architecture attaches this semantic mode
+to telemetry so the policy cannot compare unlike acknowledgements as though
+they offered identical scheduling opportunities.
+
+Let $T_{\mathrm{pub}}$, $T_{\mathrm{drain}}$, and $T_{\mathrm{ack}}$ denote
+control publication, remaining non-preemptible work, and acknowledgement
+cost. A software revocation estimate is
+\begin{equation}
+ T_{\mathrm{revoke}}\approx
+ T_{\mathrm{pub}}+\max_i T_{\mathrm{drain},i}+T_{\mathrm{ack}}.
+\end{equation}
+It becomes a bound only if each constituent is bounded under the admitted
+interference and the control path is guaranteed execution capacity. A quantum
+defined as K tiles does not provide that guarantee by itself. Cache misses,
+context scheduling, and competing traffic can stretch the time of the same
+instruction sequence. This is why the specification retains a hardware
+pause requirement even when compiler slicing is available.
+
+\subsection{An IPC implementation of admission}
+The process-level prototype coordinates one urgent client and a fixed set
+of background clients with a shared condition variable. A background process
+acquires the condition lock, verifies that no urgent interval is active, and
+marks one slice in flight. It releases the lock, launches its finite slice,
+and waits for stream completion. It then clears its in-flight mark under
+the same lock and notifies waiters. The foreground sets urgency under that
+lock and waits until every in-flight mark is clear before submitting its work.
+
+Using one lock for the check and the in-flight transition closes an important
+race. If a worker first checked an event and only later published its active
+state, the foreground could observe the old idle state and admit itself just
+before that worker launched another slice. The foreground would then have a
+false acknowledgement. The condition-variable protocol gives admission a
+linearization point. It still depends on trusted workers reporting stream
+completion honestly; it is not a security boundary against a malicious CUDA
+client.
+
+\subsection{Progress, fairness, and overload}
+Foreground protection can starve background work. A controller that pauses
+backgrounds for every full decode step may be safe for the foreground but
+economically useless when those steps occupy almost the entire timeline.
+The architecture therefore reports background progress alongside deadline
+attainment. A long interval of zero progress should trigger reconsideration
+of the lease, migration to another device if available, or explicit admission
+rejection rather than indefinite retention of scarce memory.
+
+\section{Memory and Resource Governance}
+\label{sec:memory}
+\subsection{Storage lifetime is independent of execution lifetime}
+Memory capacity often determines whether another workload can be admitted
+even when arithmetic is available. A process may hold model weights,
+request-private KV, shared prefixes, scratch, and checkpoints with very
+different lifetimes. The proposed allocator names these classes separately.
+It tracks ownership, consumers, mutability, residency, and reclaim cost,
+rather than treating all allocated bytes as equally revocable.
+
+An immutable weight image can be retained while its process has no runnable
+task. A private KV page belongs to a logical request, not to the current
+position of that request in a compacted batch. A shared prefix requires
+reference-counted ownership and copy-on-write before divergence. Scratch can
+be recycled only after the last producer and consumer complete. A partial
+reduction is durable task state until the task retires, even though the
+kernel that produced it has returned. These distinctions are essential if
+execution is to be paused or reorganized without corrupting storage.
+
+\subsection{Capacity leases and eviction}
+The architectural capacity lease includes retained bytes, an eviction class,
+and an expected restoration path. Eviction can mean dropping recomputable
+scratch, writing checkpoints to host memory, preserving an immutable host
+weight image, or refusing new requests whose KV would exceed the pool.
+These choices have different costs and correctness requirements. A byte of
+unused reserved capacity can be cheap to lend; a byte holding the only copy
+of an active request's state may be expensive to reclaim.
+
+Revocation of memory is a transaction. The controller first prevents new
+users, then waits for existing device accesses, produces a durable copy if
+required, updates the residency map, and finally returns the physical
+allocation. An application-visible pointer cannot remain valid after its
+backing storage has been reassigned unless the lower layer supplies the
+corresponding address-translation guarantee. The design therefore separates
+logical handles from physical mappings and requires versioned residency
+events for asynchronous consumers.
+
+There is no assumption that paging is always preferable to rejection. Moving
+state consumes copy engines and host links, may disturb the foreground's
+memory traffic, and can make subsequent restoration exceed its latency
+objective. A controller should compare those costs with the remaining useful
+background work. It should also account for the cost of re-prefill if KV
+state is discarded. Capacity utilization without restoration cost is an
+incomplete admission metric.
+
+\subsection{Bandwidth pacing and cache pressure}
+The implemented resident worker can impose a minimum interval between CTA
+slice starts. It does not accumulate unused credits into a later burst. This
+provides a simple logical issue-rate control and prevents a long idle period
+from authorizing an unbounded foreground-interfering burst. The descriptor
+records operand and checkpoint bytes, but the control does not enforce a
+physical DRAM or L2 bandwidth ceiling.
+
+A stronger governor would coordinate budgets across clients and resource
+domains. Per-worker pacing alone scales the aggregate allowed traffic with
+the number of workers. Reusing the same per-worker quota after doubling the
+grid can therefore double the intended issue envelope. The lease specifies
+whether a budget is per worker, per process, or per device. Global budgets
+require either a shared credit mechanism or hardware support; they cannot
+be inferred from independent local sleeps.
+
+\subsection{Copies, links, and power}
+Host transfers, peer transfers, collectives, and compute can contend for
+shared queues or memory bandwidth even when they use different engines.
+The proposed contract tags a transfer with its direction, source and
+destination, byte count, deadline class, and whether it is necessary to
+unblock urgent work. Copy admission must reserve the corresponding memory
+traffic as well as the copy engine. Otherwise a nominally independent DMA
+operation can exceed the foreground's memory budget.
+
+Power and frequency are shared state rather than per-task constants. A
+background workload can alter device clocks and thereby change both
+foreground and background service rates. The experiments use unlocked
+clocks and record that limitation; they do not derive a power-aware price
+model from isolated timing ratios. The proposed governor would need
+calibrated telemetry and an explicit policy for thermal or board-power
+constraints. It cannot obtain a per-process power guarantee by adjusting
+only the number of submitted CTAs.
+
+\subsection{Distributed extensions and tail composition}
+Although the current scope is one 32-GB GPU, the architecture admits a
+distributed coordinator above device-local leases. A collective phase must
+not be admitted independently on ranks whose progress depends on one another.
+Pausing a rank inside an uncheckpointable collective can strand peers and
+invalidate a local slack estimate. Collective entry and completion therefore
+become explicit gang-scheduling boundaries until a lower layer provides a
+stronger protocol.
+
+For illustration, if independent rank completion times have CDF $F(t)$,
+the latest of $R$ ranks has CDF $F(t)^R$. A local quantile constraint is not
+automatically a job-level constraint. Real ranks are correlated by shared
+inputs, topology, and collective timing, so the independence expression is
+a model rather than a deployment measurement. The design requires the
+coordinator to price the observed job tail and to distinguish actual rank
+measurements from projected maxima. No multi-GPU result is claimed in this
+paper's single-device experiments.

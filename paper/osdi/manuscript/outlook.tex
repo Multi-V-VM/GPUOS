@@ -1,0 +1,143 @@
+\section{Hardware and Model Co-Design}
+\label{sec:hardware}
+The component results support the source paper's premise that software
+scheduling and kernel design cannot by themselves manufacture every missing
+device guarantee. We organize the hardware interface around three primary
+requests and supporting observability and control services, following the
+agenda of Nourai and Bastani~\cite{Nourai2026GPUOS}. These are requirements
+of the proposed architecture, not capabilities claimed for the prototype.
+
+\subsection{S1: bounded pause with state-preserving resume}
+The desired primitive accepts a task or lease identifier, requests a pause,
+and acknowledges within a specified time bound while preserving restart
+state. Its contract must say whether it returns CTA resources, whether
+memory transactions are drained, how barriers are preserved, and what
+completion guarantees remain valid. A flag that stops useful issue without
+returning allocation does not satisfy the same interface.
+
+The source agenda's 5--20-$\mu$s target is substantially stronger than
+observing that an independent CUDA process eventually runs. Our approximately
+2-ms different-process probe latency is evidence that non-cooperative work
+need not monopolize this device, but it is neither an application-selected
+deadline nor a microsecond pause guarantee. Compiler-generated kernel
+boundaries provide another usable control point, at the cost of submission,
+checkpoint traffic, and lost locality. Both remain relevant even if future
+hardware reduces one part of the revocation cost.
+
+\subsection{S2: priority and rate control in shared memory paths}
+SM separation alone cannot prevent L2 or DRAM interference. The desired
+memory interface tags transactions by task class and supports policies for
+urgent queueing, background rate limits, and observable enforcement. A
+meaningful guarantee must distinguish bandwidth from latency and must define
+the granularity at which priorities can change. Cache partitioning alone
+does not provide a bound on memory-controller queueing delay.
+
+The controller must also avoid starving traffic that is required for forward
+progress. A background checkpoint or an outstanding write can be necessary
+before resources become reclaimable. Treating all such traffic as indefinitely
+deferrable can prevent the urgent lease from acquiring those resources.
+The proposed tagging model includes dependency-critical completion traffic
+and a bounded drain class in addition to foreground and background payloads.
+The current CTA issue pacing does not implement this memory-controller policy.
+
+\subsection{S3: enforceable per-kernel partitions}
+The desired partition contract states which execution resources a kernel can
+use and is honored consistently across ordinary launch, recorded graphs,
+and changes of model phase. Static partitions can still be useful, but
+rapidly alternating phases require either inexpensive partition changes or
+a scheduler that selects appropriately provisioned queues. Merely accepting
+a partition parameter in an API is not evidence that the physical execution
+honors it.
+
+A phase-dependent controller must account for its own transition cost.
+Switching streams, queues, or contexts can introduce bubbles, synchronization,
+and cache disruption. A promising single-layer result can consequently fail
+when every layer pays the transition. The proposed planner evaluates complete
+steps and includes partition transitions in the cost model. It does not add
+the best isolated-phase throughput values and call the sum a feasible model
+schedule.
+
+\subsection{Supporting services and observability}
+Priority inside an SM would complement, rather than replace, admission and
+memory control. Urgent instructions sharing a resident allocation can still
+be delayed by dependencies or transactions already issued by other work.
+Fast device-wide signals and queues are useful when they have explicit
+memory-ordering and progress guarantees. Accessible counters should separate
+residency, arithmetic activity, traffic, and queueing instead of exposing one
+ambiguous utilization number. Priority and pacing for copy engines, links,
+and power complete the resource-vector interface.
+
+\subsection{Models that produce predictable sharing opportunities}
+Model architecture can make the scheduling problem easier without replacing
+the OS contract. Balanced expert routing and similar expert sizes can reduce
+phase variability. Linear-attention components can avoid some context-length
+growth in the recurrent state update. Speculative or multi-token processing
+can change the arithmetic reuse of a step. Each choice also changes numerical
+semantics, latency, or memory use and must be evaluated with the actual model.
+We do not infer a service speedup from regularity alone.
+
+\section{Related Work and Scope}
+\label{sec:related}
+The resource-vector and slack-budget framing is directly inherited from
+\emph{The GPU Needs an Operating System}; its large-model measurements and
+hardware proposals motivate this specification~\cite{Nourai2026GPUOS}.
+Our emphasis is the executable meaning of safe points, resource return,
+publication, and admission, together with the boundaries visible in local
+prototypes. Reframing those ideas as an API is not a claim of having invented
+GPU sharing or having implemented the entire proposed stack.
+
+FX provides the program-capture substrate and Triton the tiled code-generation
+substrate~\cite{Reed2022FX,Tillet2019Triton}. The present compiler adds a
+restricted checkpointed execution plan; it is not a replacement for either
+general compiler framework. MPK combines a compiler and runtime for
+mega-kernelizing tensor programs~\cite{Cheng2026MPK}. Meld couples dynamic
+work placement, cross-SM cooperation, and just-in-time reduction
+\cite{He2026Meld}. Our matched controls show why allocation, fusion, and
+transport must be separated when attributing a speedup. Moving intermediate
+data or claiming an unstarted CTA is not migration of a live program counter.
+
+CUDA context scheduling, stream priorities, green contexts, and MPS are
+lower-layer mechanisms with distinct contracts~\cite{CUDAStreams,CUDAGreen,NVIDIAMPS,CUDAComputePreemption}.
+The architecture uses them where their documented guarantees match a lease.
+It does not equate MPS clients with independent devices or a software memory
+quota with hardware fault isolation. PagedAttention demonstrates the value
+of treating KV allocation and sharing as first-class serving concerns
+\cite{Kwon2023PagedAttention}; scheduling the compute that accesses those
+pages requires additional lifetime and revocation rules.
+
+\section{Limitations and Research Questions}
+\label{sec:limits}
+The complete object model remains an architectural specification. The current
+artifact contains bounded fused inference, a restricted graph compiler,
+cooperative workers, an IPC admission prototype, and diagnostics. It lacks
+an integrated multi-tenant service, arbitrary-kernel transformation, a learned
+interference predictor, a general memory-lease manager across protected
+contexts, and the proposed hardware QoS controls. Correctness of supported
+graphs and component numerical checks is not a proof of whole-system
+isolation, fault recovery, or deadline satisfaction.
+
+The measurements use one consumer Blackwell GPU with unlocked clocks.
+They neither reproduce the source paper's RTX PRO 6000 model serving nor
+establish transfer to AMD, TPU, SRAM-centric accelerators, or multi-node
+deployments. Roofline reasoning can motivate those investigations, but
+partition granularity, memory-system behavior, driver scheduling, and
+communication must be remeasured on each target. In particular, the observed
+context-switch diagnostic cannot specify a worst-case scheduling bound.
+
+\section{Conclusion}
+GPU sharing requires more than placing additional kernels beside a model.
+It requires a contract for what work can stop, what state survives, what
+resources are actually returned, and how much foreground slack admission
+is allowed to spend. \system{} specifies that contract across processes,
+compiler slices, resource leases, and hardware services. The component
+evidence supports useful bounded execution and selected sharing opportunities,
+while exposing costs that simpler utilization arguments miss. The architectural
+goal is a general GPU operating system; the present contribution is a
+specified path toward that goal with explicit implementation and evidence
+boundaries.
+
+\paragraph{Artifact and drafting disclosure.}
+The repository includes raw timings, hashes, numerical checks, and build
+instructions. Both figures retain qualified data; incomplete sweep rounds
+are excluded from aggregate claims. AI-assisted tools supported code,
+analysis, and prose. Results derive from retained measurement records.
