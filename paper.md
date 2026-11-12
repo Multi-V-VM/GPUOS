@@ -14,6 +14,14 @@ It preserves the original GPUOS system-architecture and execution/storage
 contract diagrams as Figures 1–2; measurements appear in text and tables. Existing measurements and proposed services remain distinct.
 Implementation and additional GPU experiments remain paused.
 
+The November 12 revision strengthens the system contract: versioned grants,
+resource-return acknowledgements, conditional safety invariants, checkpoint
+feasibility, joint-tail admission, and failure handling. The
+[design companion](69e5c13c57662528991eb76c/DESIGN-CONTRACT.md) documents the
+full protocol and future validation obligations. Four additional primary
+related-work references clarify the contribution relative to existing GPU
+sharing and preemption systems.
+
 The previous update targeted `paper/osdi/main.tex` by mistake. That file is
 retained as an alternate-format revision; the IPDPS `main.tex` above is now
 the corrected target. Its earlier source and PDF were backed up locally before

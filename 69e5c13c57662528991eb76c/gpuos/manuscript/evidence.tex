@@ -201,6 +201,8 @@ background. These observations are consistent with driver-managed hardware
 context preemption~\cite{CUDAComputePreemption}; they do not expose its
 internal save format or measure the context-save operation in isolation.
 The reported latency includes driver scheduling and submission overhead.
+With only 20 trials per mode, the interpolated empirical p99 is near the
+maximum sample; it is not a population-tail estimate or a worst-case bound.
 
 The process harness also runs one native Qwen foreground with one or three
 compiler-generated GEMM background processes on this same device. Separate

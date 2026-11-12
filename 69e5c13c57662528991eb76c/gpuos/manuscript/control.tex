@@ -32,15 +32,22 @@ can value completed work, throughput, or application priority. A scalar
 FLOP count is appropriate only when comparing work whose output and precision
 make that count meaningful.
 
-This formulation does not imply that a useful global optimizer is already
-available. The implemented policy uses a measured table for a known workload.
-Among numerically qualified cooperative configurations whose calibration
-p99 meets the budget, it chooses the highest measured background rate.
-Unknown configurations are not admitted by extrapolation. Selection is
-frozen before held-out samples are collected. If a selected window fails,
-the controller revokes background admission for a later window; it cannot
-repair a deadline already missed. The experiment tests this narrow selection
-rule, not prediction under arbitrary future workload shifts.
+The implemented policy uses a measured configuration table: select the
+highest-throughput numerically qualified cooperative candidate whose
+calibration p99 passes, freeze it, and evaluate held-out steps. It does not
+estimate costs for unseen combinations. The architectural controller additionally
+requires matching foreground phase, geometry, executable, and backend versions.
+A changed key invalidates the entry; a failed validation window disables later
+admissions until recalibration. Revocation cannot repair a missed deadline.
+
+Quantile admission requires care. In general, adding the p99 of standalone
+service, interference, and revocation does not produce the p99 of their sum.
+If thresholds $b_j$ have valid tail bounds $\Pr[X_j>b_j]\leq\delta_j$, then
+$\Pr[\sum_j X_j>\sum_j b_j]\leq\sum_j\delta_j$ by a union bound, without
+independence. Achieving a target tail budget therefore requires allocating
+that budget across components or directly validating their joint interval.
+The present paired experiment uses the latter approach; it does not establish
+stationarity or probabilistic guarantees for future workload changes.
 
 \subsection{The cost model must include the foreground}
 A useful cost table records an allocation-only baseline in addition to a
@@ -101,82 +108,72 @@ linearization point. It still depends on trusted workers reporting stream
 completion honestly; it is not a security boundary against a malicious CUDA
 client.
 
-\subsection{A worked admission and revocation sequence}
-Consider an urgent decode client and an adapter-update client whose ready
-matrix product has been lowered to output tiles and K chunks. This example
-specifies the proposed protocol; it is not an additional experiment. Before
-sharing begins, the controller qualifies the foreground geometry, prepares
-the background executable, allocates its partial accumulators, and resolves
-all input dependencies. It records a code epoch and a lease generation with
-the execution cursor. Compilation and first-use initialization occur before
-the urgent client depends on a bounded revocation interval.
+\subsection{Admission procedure and safety conditions}
+The proposed control path has four steps. (1) Prepare a background task outside
+the urgent path and match its foreground/backend key to a qualified cost entry.
+(2) Reserve checkpoint storage, control-path capacity, and revocation margin;
+choose a candidate only if the remaining slack and resource constraints pass.
+(3) Under the admission lock, issue a generation-tagged finite grant. When
+urgency arrives, close grants before requesting revocation. (4) Resume urgent
+work only after acknowledgements from every conflicting lease return the
+required resource mask. Revalidate the key before resuming background work.
+The current lookup and IPC service realize different parts of this procedure;
+the complete cross-backend controller is specified here.
 
-Suppose the foreground announces an eligible sharing interval. The controller
-looks up a qualified allocation and checkpoint policy and subtracts its
-revocation reserve from the available slack. A positive remainder permits
-one background grant. A nonpositive remainder admits no work, even if tensor
-activity is low. The grant identifies the task, generation, allowed program
-range, and K extent. The backend issues only that range; the next grant may
-change its program count without changing which tiles have already committed.
-This makes resource resizing a change in future scheduling rather than an
-implicit restart of completed arithmetic.
+Three invariants define its safety obligations. \emph{Commit before publish:}
+a cursor is visible only after all partial state it names is durable in the
+required memory domain. \emph{No use after revoke:} closing generation $g$
+prevents new grants, and each acknowledgement covers all grants already
+issued for $g$. \emph{Last consumer before reuse:} completion of a producer
+alone cannot reclaim its output, checkpoint, or executable epoch.
 
-When urgent work becomes ready, the broker closes admission before waiting
-for outstanding slices. The finite-slice executor finishes its current launch,
-commits the next cursor, and acknowledges stream completion. A stale completion
-from a previous lease generation cannot satisfy this acknowledgement. Only
-then does the foreground receive the resources promised by this backend.
-If the background is instead a resident cooperative worker, the acknowledgement
-has a different meaning: its arithmetic pauses, but its register and shared
-memory allocation remains occupied. The controller must have admitted that
-retained footprint in advance.
+The argument is conditional on trusted clients, correct release/acquire
+ordering, nonoverlapping output ownership, and the backend's stated completion
+contract. Initially, prepared tasks publish no output and own their storage.
+A grant preserves ownership; a commit advances the cursor only after valid
+writes; dependent consumers become eligible only after publication. Closing
+grants and draining their recorded completions leave no authorized old-generation
+writer. Reference retirement then permits reuse. By induction over these
+transitions, pausing and resuming cannot expose an uncommitted result or
+reassign storage still owned by a live consumer. This is an argument about
+the specified protocol, not a proof of arbitrary kernels or malicious clients.
 
-After the urgent interval, the controller validates the foreground class and
-lease generation again. An unchanged workload may reuse the qualified policy;
-a changed context shape or model phase can require a different entry or solo
-execution. Resumption consumes the last committed accumulator and cursor,
-not the original inputs alone. Once all output tiles finish, a completion
-event releases dependent work. Storage is reclaimed only after those consumers
-retire. This sequence joins admission, execution, and lifetime management
-without treating a returned host call as proof of device completion.
+Safety alone does not imply a deadline. Foreground protection additionally
+requires execution capacity for the control path and upper bounds on urgent
+service, residual background execution, and interference whose sum fits the
+remaining deadline. Sleeping resident CTAs can violate the capacity premise;
+unbounded driver scheduling can violate the time premise. In either case,
+the implementation must expose a weaker service class rather than advertise
+a deterministic pause bound.
 
 \subsection{Failure, cancellation, and ownership}
 A general OS contract needs a terminal failure state as well as a successful
 checkpoint state. The specification distinguishes user cancellation, an
 expired admission lease, a worker that stops responding, and a device error.
-Cancellation first prevents future grants. It does not retroactively erase
-stores or DMA operations already issued. An output is published as successful
+Cancellation or lease expiry prevents future grants; neither cancels stores
+or DMA operations already issued. An output is published as successful
 only after its completion condition holds; a cancelled partial output remains
 private until its in-flight accesses are known to have ended.
 
-The proposed recovery record contains the task identifier, executable epoch,
-lease generation, last committed cursor, and the ownership of every durable
-partial buffer. Replaying from that record is valid only if the associated
-inputs and executable remain available and the task's declared side effects
-permit replay. Pure tensor stages make this rule tractable. A kernel that
-updates external state or participates in a collective needs a separate
-commit protocol; the scheduler cannot manufacture exactly-once effects by
-relaunching it after a timeout.
-
-A timeout is evidence of missing acknowledgement, not evidence that memory
-is safe to reuse. If a worker process dies while device work may remain,
-the controller must obtain a lower-layer completion or teardown guarantee
-before recycling its allocations. Until then it quarantines the affected
-lease or reports failure to the foreground. A proposed deadline guarantee
-must budget this failure behavior separately from ordinary checkpoints.
-The current trusted IPC prototype checks its local admission lifecycle; it
-does not implement durable crash recovery, hostile-client containment, or
-a bounded device-reset service. Those requirements define how the architecture
-would extend beyond the tested cooperative setting.
+Recovery records bind a cursor and committed buffers to task, code epoch,
+and lease generation. Crash-safe replay needs versioned state: overwriting an
+in-place accumulator can invalidate the previous checkpoint before publication.
+Replay also requires retained inputs and replay-safe effects. Updating external state or entering a
+collective needs its own commit protocol; relaunch after timeout does not
+provide exactly-once effects. A timeout is missing acknowledgement, not proof
+that allocations are safe. A crashed worker's lease remains quarantined until
+the lower layer confirms completion or teardown. The IPC prototype provides neither crash recovery nor reset-surviving state.
 
 \subsection{Progress, fairness, and overload}
 Foreground protection can starve background work. A controller that pauses
 backgrounds for every full decode step may be safe for the foreground but
 economically useless when those steps occupy almost the entire timeline.
 The architecture therefore reports background progress alongside deadline
-attainment. A long interval of zero progress should trigger reconsideration
-of the lease, migration to another device if available, or explicit admission
-rejection rather than indefinite retention of scarce memory.
+attainment. Aging changes the order of eligible background grants but cannot
+create foreground slack. A promised minimum background rate requires explicit
+capacity reservation and foreground admission control; best-effort leases make
+no such promise. Sustained starvation ends a lease or triggers relocation where
+available, instead of retaining memory indefinitely for a task that cannot run.
 
 \section{Memory and Resource Governance}
 \label{sec:memory}

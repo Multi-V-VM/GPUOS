@@ -36,8 +36,9 @@ faster. A streaming proxy admits \slackProxyMediumRate{} TFLOP/s of background
 work at \slackProxyMediumCost\% foreground p99 cost, but whole-step suspension
 recovers little work beside full-model replay. These measurements support
 selected mechanisms rather than a completed general-purpose implementation.
-The paper presents a unified system specification, its implemented subset,
-and the remaining compiler, service, and hardware requirements.
+The paper specifies a versioned lease API, conditional safety invariants,
+and checkpoint/admission feasibility conditions, with an explicit boundary
+between component evidence and remaining service and hardware requirements.
 \end{abstract}
 
 \input{gpuos/manuscript/design}

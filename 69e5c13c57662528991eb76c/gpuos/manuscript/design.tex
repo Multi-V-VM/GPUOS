@@ -38,11 +38,17 @@ whole-step suspension yields little work beside full-model replay.
 The OS must therefore be able to reject an elaborate scheduling path
 when ordinary co-running is better.
 
-Our contribution is an explicit architectural specification, an execution
-contract separating checkpoint safety from resource return, and component
-evidence for bounded implementations. The resource-vector and slack-driven
-sharing ideas originate in the cited work; new hardware services and a
-completed general-purpose implementation are not claimed.
+The central question is whether a scheduler can rely on a pause
+acknowledgement without confusing preserved computation with returned
+resources. We address it with three contributions. First, a versioned lease
+contract binds executable state, storage ownership, and the resources returned
+at suspension. Second, a conditional safety argument and admission procedure
+connect those contracts to foreground protection, with explicit assumptions
+about enforcement and uncertainty. Third, component experiments separate
+useful fusion, cooperative issue suspension, finite kernel slicing, and
+existing context switching. The resource-vector and slack-driven motivation
+originates in the cited work. Our contribution is the contract and its
+component realization, rather than a claim of a new hardware primitive.
 
 \section{Why GPU Sharing Needs an OS Contract}
 \label{sec:motivation}
@@ -158,27 +164,34 @@ the capability boundary is given in Table~\ref{tab:layers}.}
 \label{fig:sys_arch}
 \end{figure*}
 
-Figure~\ref{fig:sys_arch} retains the original architecture diagram.
-A task descriptor identifies work and its inputs; a versioned operator entry
-identifies code. Their lifetimes must satisfy the publication and retirement
-rules below, independently of whether a backend uses a resident executor.
+Figure~\ref{fig:sys_arch} connects host submission, task descriptors,
+versioned code, and device execution through the contracts below.
 
-\subsection{Processes, tasks, and leases}
-A \emph{GPU process} is the unit of ownership and accounting. Its identity
-names an address-space authority, loaded executable versions, memory
-allocations, and outstanding tasks. Trusted tasks may share one CUDA context
-and even one fused executor; mutually untrusted tasks require a protection
-boundary supplied below the runtime. The API makes this trust mode explicit
-rather than treating a common function-pointer table as process isolation.
+\subsection{Service boundary, objects, and interface}
+The initial service boundary is one device, one urgent class, and trusted
+background clients. A GPU process owns executable versions, allocations,
+and tasks; a task names code, tensor views, access modes, dependencies, and
+checkpoint state. A slice is a bounded part of a task. A lease authorizes
+slices to consume resources and states the suspension mode. Mutually untrusted
+clients require separate driver protection domains: cooperation inside a
+common persistent kernel is not memory or fault isolation.
 
-A \emph{task} names executable work and its dependency edges. Its descriptor
-contains a code version, tensor views, input/output access modes, a progress
-format, a resource declaration, and a deadline class. A \emph{slice} is a
-bounded portion of that task with one well-defined commit boundary. A
-\emph{lease} grants resources to one or more eligible slices for a bounded
-interval. A lease also specifies what must happen on revocation: retain a
-resident allocation, drain and return CTA resources, save to device memory,
-or invoke a driver-managed context transition.
+The proposed API has five operations. \texttt{prepare} validates specialization,
+access rights, code epoch, storage, and backend capabilities without admitting
+execution. \texttt{grant} binds a task to a lease generation and a finite work
+extent. \texttt{revoke} closes further grants for that generation.
+\texttt{ack} publishes a committed cursor and a resource-return mask only after
+the corresponding backend completion condition. \texttt{retire} releases
+storage and code references after all consumers finish. These are logical
+operations; the prototypes expose parts through different interfaces.
+
+A lease token is $(p,t,e,g)$: process, task, executable epoch, and generation.
+The controller validates the entire token before accepting progress or
+completion. A late acknowledgement from generation $g$ cannot close $g+1$.
+An acknowledgement distinguishes stopped arithmetic, returned CTA resources,
+and reclaimable storage. A resident worker may provide only the first;
+a finite kernel returns CTA resources but can retain checkpoints. Admission
+must test the mask it needs, not merely whether a pause flag is set.
 
 \subsection{Resource vectors and accounting}
 The proposed lease resource vector is
@@ -186,31 +199,20 @@ The proposed lease resource vector is
  \mathbf r=(r_{\mathrm{SM}},r_{\mathrm{TC}},r_{\mathrm{L2}},r_{\mathrm{DRAM}},
  r_{\mathrm{cap}},r_{\mathrm{link}},r_{\mathrm{copy}},r_{\mathrm{power}}).
 \end{equation}
-The coordinates have different units. SM allocation concerns resident
-blocks, warp issue, registers, and shared memory. Tensor work concerns
-arithmetic issue. Cache and DRAM budgets concern traffic and queueing.
-Capacity is bytes held over time plus the cost of reclaiming them. Link and
-copy resources include direction and endpoint. Power affects clock rates
-shared by otherwise disjoint work. A scalar utilization percentage cannot
-substitute for this vector.
+These coordinates have different units: SM allocation includes registers,
+shared memory, and resident blocks; tensor work concerns arithmetic issue;
+cache/DRAM govern traffic; capacity includes reclaim cost; copies and links
+have directions and endpoints; power changes shared clocks. Compiler-declared
+logical bytes are distinct from measured physical traffic because cache reuse
+and competing clients change the latter. Unavailable counters remain unknown.
 
-Declarations and measurements serve different purposes. A compiler can
-report the logical inputs and scratch required by a slice, along with the
-compiled register and shared-memory allocation. It cannot derive physical
-DRAM traffic exactly from those fields because cache hits, reuse, and other
-clients alter that traffic. The accounting service keeps both values, with
-explicit labels. If a counter is unavailable, it remains unknown; it is not
-filled with an arithmetic estimate and presented as a measurement.
-
-Resource prices are foreground costs, not universal exchange rates. For
-foreground class $f$, background declaration $\mathbf r$, and execution
-state $x$, write $C_f(\mathbf r,x)$ for the additional completion time. The
-state includes phase, batch geometry, context length, device allocation,
-and recent interference. Even if individual resource effects are measurable,
-their combination need not be additive. Cache eviction can increase DRAM
-traffic, and a power change can alter the service time of every slice.
-The implemented lookup does not assume a linear price model; a more general
-predictor must be validated on resource combinations before admission uses it.
+For foreground class $f$ and execution state $x$, $C_f(\mathbf r,x)$ is the
+additional completion time caused by a grant. State includes phase, batch,
+context length, and device allocation. Prices need not add: cache eviction
+raises DRAM demand, while frequency changes affect every slice. The lookup
+uses measured combinations; a predictor for unseen combinations would need
+separate validation. Average low utilization is never sufficient admission
+evidence.
 
 \subsection{Events and executable versions}
 The architecture uses release/acquire publication between producers and
@@ -282,8 +284,10 @@ chunk. It lives in the host executor; partial arithmetic state lives in
 device allocations. The executor advances through all program ranges of a
 chunk before advancing the chunk, allowing successive grants to change
 their program counts without skipping or duplicating output tiles. The
-same stream orders those grants. Resuming on another stream requires an
-explicit handoff; the prototype rejects an unordered stream change.
+same stream orders those grants. The host submission cursor can advance before
+device completion; it is not a committed checkpoint. An acknowledgement must
+wait for the stream before reporting completed progress. The prototype rejects
+an unordered stream change.
 
 Every slice is a finite kernel launch. Once that launch completes, its CTA
 resources are returned to the CUDA scheduler. This is the important semantic
@@ -292,6 +296,24 @@ and synchronization work, more partial-state traffic, and possibly worse
 cache reuse. The compiler exports resource and progress metadata so that the
 controller can account for these costs. A maximum program count or K extent
 is a bound on work geometry, not a guaranteed number of microseconds.
+
+\subsection{Selecting checkpoint granularity}
+In a serialized finite-slice approximation, let $\tau$ be useful execution
+time and $h$ amortized overhead, including launch and state commit. Keeping
+$h/(\tau+h)$ below $\epsilon$ requires $\tau\geq h(1-\epsilon)/\epsilon$.
+For pause target $L$, publication cost $p$, residual checkpoint cost $d$,
+and acknowledgement cost $a$, feasibility requires
+\begin{equation}
+ \frac{h(1-\epsilon)}{\epsilon}\leq\tau\leq L-p-d-a.
+ \label{eq:quantum}
+\end{equation}
+The right side assumes one in-flight slice and bounded constituent costs
+under admitted interference. These times differ from the experiment's K-tile
+count $q$. Empty intervals require another backend, a relaxed objective,
+or refusal to share. Checkpoint size and cache effects make $h$ and $d$
+geometry-dependent. Thus shorter slices can improve responsiveness while
+reducing useful throughput; a compiler must expose candidate costs, not
+just a maximum tile count.
 
 \begin{figure*}[t]
 \centering

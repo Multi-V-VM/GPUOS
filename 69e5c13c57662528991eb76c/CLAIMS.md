@@ -8,11 +8,11 @@ measurement claims. The original source is Nourai and Bastani,
 | Source idea | Manuscript location | Treatment |
 |---|---|---|
 | Decode roofline; expert-local batch; structural idle arithmetic | §2.1 | Derivation plus attributed OpenInfer measurements; distinct from our device |
-| Stream priority, finite block lifetime, spatial partition limits | §§2.2–2.3, 4.4, 7.7 | Documented contracts and local context-switch diagnostic |
+| Stream priority, finite block lifetime, spatial partition limits | §§2.2–2.3, 4.5, 7.7 | Documented contracts and local context-switch diagnostic |
 | Resource vector and workload-dependent prices | §3.3, §5.2 | Architecture, units, logical/physical accounting, allocation-only controls |
 | Six-layer OS and slack admission | §§3.1, 5 | Full architecture; capability table distinguishes prototype coverage |
 | Compiler-generated resumable slices and resource declarations | §4 | Strict FX/Triton subset; no arbitrary CUDA transformation claim |
-| Resident model service and phase-boundary background roles | §4.3 | Attributed source design; distinguishes our frontier-level executor |
+| Resident model service and phase-boundary background roles | §4.4 | Attributed source design; distinguishes our frontier-level executor |
 | Memory leases, cache, bandwidth, links, copies, power | §6 | Proposed governance with bounded implemented mechanisms identified |
 | Quantile budgets, multi-rank tail and phase-switch overhead | §§5.1, 6.5, 8.3 | Statistical scope and distributed design, no multigpu measurement claim |
 | Synthetic/real background and useful-work denominators | §§7.4–7.5 | Qualified local controls; custom GEMM solo rate is not GPU peak |
@@ -42,5 +42,22 @@ measurement claims. The original source is Nourai and Bastani,
   claim in this paper is derived from those partial rounds.
 
 The main manuscript has two figures and five tables. `gpuos-layout-check.json`
-records PDF layout, included figure hashes, and recomputed diagnostic values.
+records PDF layout, original figure hashes, and bibliography checks.
 No new GPU benchmark is required to compile the manuscript.
+
+## November 12 design additions
+
+- §3.2 specifies logical prepare/grant/revoke/ack/retire operations and a
+  generation-tagged lease. These are integration requirements, not a claim
+  that the components expose one complete API.
+- §4.3 derives a checkpoint feasibility interval under a serialized finite-slice
+  model. Its costs are parameters, not new GPU measurements.
+- §5.1 distinguishes joint-tail validation from adding component p99 values.
+- §5.5 gives the admission procedure and a conditional safety argument;
+  §5.6 distinguishes orderly checkpointing from crash-safe recovery.
+- §9 cites primary publications for REEF, XSched, Salus, and Gandiva.
+  They are related work, not measured baselines in this artifact.
+- `DESIGN-CONTRACT.md` expands the interfaces, assumptions, failure cases, and
+  tests needed for future integration. No new GPU experiment was run.
+- `gpuos/build.py` checks the two original figure hashes, author list,
+  bibliography, exact page count, and self-contained package compilation.

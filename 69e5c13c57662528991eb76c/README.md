@@ -12,17 +12,26 @@ proposed services are not described as completed implementations.
 The two retained figures are the original **GPUOS system architecture** and
 **GPUOS execution and storage contract** diagrams, copied byte-for-byte into
 `gpuos/figures/01_system_architecture.pdf` and `02_execution_storage.pdf`.
-They appear as Figures 1 and 2 on pages 4 and 5. Qualified request/replay
+They remain Figures 1 and 2; the current page positions are recorded in
+`gpuos-layout-check.json`. Qualified request/replay
 measurements are presented in text and tables, not replacement figures.
 The manuscript text and generated numerical inputs are under `gpuos/`.
 Additional scheduling and failure-handling semantics are in
 `gpuos/manuscript/control.tex`. [Claim provenance](CLAIMS.md) distinguishes
 source ideas, architecture, and local measurements.
 
-Build from this directory:
+The November 12 design revision adds a five-operation lease API, generation
+and resource-return semantics, three safety invariants with a conditional
+argument, checkpoint feasibility constraints, statistical admission limits,
+and explicit comparisons with REEF, XSched, Salus, and Gandiva.
+[Detailed design companion](DESIGN-CONTRACT.md) expands the contracts,
+crash-recovery requirements, and future integration validation cases.
+It does not report those future cases as completed experiments.
+
+Build and validate from this directory:
 
 ```bash
-latexmk -pdf -interaction=nonstopmode -halt-on-error -jobname=FuseOS-IPDPS-2027 main.tex
+python3 gpuos/build.py --package --verify-package
 ```
 
 The source package is self-contained; select `main.tex` in Overleaf. It needs

@@ -1,28 +1,18 @@
 \section{Hardware and Model Co-Design}
 \label{sec:hardware}
-The component results support the source paper's premise that software
-scheduling and kernel design cannot by themselves manufacture every missing
-device guarantee. We organize the hardware interface around three primary
-requests and supporting observability and control services, following the
-agenda of Nourai and Bastani~\cite{Nourai2026GPUOS}. These are requirements
-of the proposed architecture, not capabilities claimed for the prototype.
+The architecture requires three hardware interfaces and supporting telemetry,
+following Nourai and Bastani~\cite{Nourai2026GPUOS}. The prototype measurements
+motivate these requirements without implementing them.
 
 \subsection{S1: bounded pause with state-preserving resume}
-The desired primitive accepts a task or lease identifier, requests a pause,
-and acknowledges within a specified time bound while preserving restart
-state. Its contract must say whether it returns CTA resources, whether
-memory transactions are drained, how barriers are preserved, and what
-completion guarantees remain valid. A flag that stops useful issue without
-returning allocation does not satisfy the same interface.
-
-The source agenda's 5--20-$\mu$s target is substantially stronger than
-observing that an independent CUDA process eventually runs. Our approximately
-2-ms different-process probe latency is evidence that non-cooperative work
-need not monopolize this device, but it is neither an application-selected
-deadline nor a microsecond pause guarantee. Compiler-generated kernel
-boundaries provide another usable control point, at the cost of submission,
-checkpoint traffic, and lost locality. Both remain relevant even if future
-hardware reduces one part of the revocation cost.
+A pause primitive must identify a task/lease, preserve restart state, and
+acknowledge within a specified bound. Its contract states whether CTA resources
+return, outstanding transactions drain, and barriers remain valid. The source
+agenda's 5--20-$\mu$s target~\cite{Nourai2026GPUOS} is much stronger than our
+approximately 2-ms process-visible probe latency. Compiler kernel boundaries
+provide software control with submission and state-traffic costs; driver
+switching provides opaque state preservation. Neither observation supplies
+an application-selected microsecond deadline.
 
 \subsection{S2: priority and rate control in shared memory paths}
 SM separation alone cannot prevent L2 or DRAM interference. The desired
@@ -41,21 +31,13 @@ and a bounded drain class in addition to foreground and background payloads.
 The current CTA issue pacing does not implement this memory-controller policy.
 
 \subsection{S3: enforceable per-kernel partitions}
-The desired partition contract states which execution resources a kernel can
-use and is honored consistently across ordinary launch, recorded graphs,
-and changes of model phase. Static partitions can still be useful, but
-rapidly alternating phases require either inexpensive partition changes or
-a scheduler that selects appropriately provisioned queues. Merely accepting
-a partition parameter in an API is not evidence that the physical execution
-honors it.
-
-A phase-dependent controller must account for its own transition cost.
-Switching streams, queues, or contexts can introduce bubbles, synchronization,
-and cache disruption. A promising single-layer result can consequently fail
-when every layer pays the transition. The proposed planner evaluates complete
-steps and includes partition transitions in the cost model. It does not add
-the best isolated-phase throughput values and call the sum a feasible model
-schedule.
+A partition contract must be honored across ordinary launches, recorded
+graphs, and model-phase changes. Static partitions remain useful; phase-adaptive
+sharing also needs cheap changes or queues with suitable allocations.
+The controller must price stream/queue transitions, synchronization, and cache
+disruption over a complete step. Adding each phase's best isolated throughput
+can produce an infeasible schedule when every transition introduces a bubble.
+A software parameter alone does not establish physical partition enforcement.
 
 \subsection{Supporting services and observability}
 Priority inside an SM would complement, rather than replace, admission and
@@ -78,32 +60,48 @@ We do not infer a service speedup from regularity alone.
 
 \section{Related Work and Scope}
 \label{sec:related}
-The resource-vector and slack-budget framing is directly inherited from
-\emph{The GPU Needs an Operating System}; its large-model measurements and
-hardware proposals motivate this specification~\cite{Nourai2026GPUOS}.
-Our emphasis is the executable meaning of safe points, resource return,
-publication, and admission, together with the boundaries visible in local
-prototypes. Reframing those ideas as an API is not a claim of having invented
-GPU sharing or having implemented the entire proposed stack.
+The resource-vector and slack-budget framing is inherited from
+\emph{The GPU Needs an Operating System}~\cite{Nourai2026GPUOS}.
+We turn that agenda into a contract joining checkpoint state, resource return,
+and storage/code lifetime. The distinctive question is what admission may
+conclude from an acknowledgement, including cases where useful issue stops
+but the allocation remains occupied.
 
-FX provides the program-capture substrate and Triton the tiled code-generation
-substrate~\cite{Reed2022FX,Tillet2019Triton}. The present compiler adds a
-restricted checkpointed execution plan; it is not a replacement for either
-general compiler framework. MPK combines a compiler and runtime for
-mega-kernelizing tensor programs~\cite{Cheng2026MPK}. Meld couples dynamic
-work placement, cross-SM cooperation, and just-in-time reduction
-\cite{He2026Meld}. Our matched controls show why allocation, fusion, and
-transport must be separated when attributing a speedup. Moving intermediate
-data or claiming an unstarted CTA is not migration of a live program counter.
+Prior systems already schedule and preempt GPU work. REEF uses reset-based
+preemption for suitable DNN inference kernels and dynamically pads urgent
+kernels with background work~\cite{Han2022REEF}. Its replay assumptions differ
+from saving a reduction cursor and accumulator, and its results preclude a
+blanket claim that microsecond preemption is absent from existing research.
+XSched abstracts preemptible command queues across accelerator capabilities
+\cite{Shen2025XSched}. Our lease is complementary: it describes retained state,
+resource-return semantics, and the interference budget surrounding a dispatch
+mechanism. We do not claim broader portability or faster preemption than either
+system; neither is an experimental baseline in the local artifact.
 
-CUDA context scheduling, stream priorities, green contexts, and MPS are
-lower-layer mechanisms with distinct contracts~\cite{CUDAStreams,CUDAGreen,NVIDIAMPS,CUDAComputePreemption}.
-The architecture uses them where their documented guarantees match a lease.
-It does not equate MPS clients with independent devices or a software memory
-quota with hardware fault isolation. PagedAttention demonstrates the value
-of treating KV allocation and sharing as first-class serving concerns
-\cite{Kwon2023PagedAttention}; scheduling the compute that accesses those
-pages requires additional lifetime and revocation rules.
+Salus couples iteration scheduling with memory sharing in a consolidated
+execution service~\cite{Yu2020Salus}. Gandiva uses repetitive training behavior
+to guide time slicing and placement across a cluster~\cite{Xiao2018Gandiva}.
+These establish sharing and workload predictability as prior ideas. GPUOS
+focuses on the contract between an inference deadline, a revocable slice,
+and state whose lifetime exceeds that slice. Device-local leases do not
+replace a cluster scheduler or imply tested migration.
+
+FX and Triton provide capture and tiled code generation
+\cite{Reed2022FX,Tillet2019Triton}; our backend adds a restricted checkpointed
+plan. MPK compiles tensor programs into megakernel execution~\cite{Cheng2026MPK}.
+Meld combines dynamic work placement and cross-SM cooperation with just-in-time
+reduction~\cite{He2026Meld}. Fusion changes the work and synchronization that
+a lease contains, whereas the lease governs when that work may run and what
+must survive suspension. The matched controls separate those effects.
+
+CUDA stream priorities, green contexts, MPS, and context switching provide
+distinct lower-layer mechanisms~\cite{CUDAStreams,CUDAGreen,NVIDIAMPS,CUDAComputePreemption}.
+A lease selects a mechanism whose contract matches its needs. PagedAttention
+addresses KV allocation and sharing~\cite{Kwon2023PagedAttention}; compute
+revocation additionally requires that outstanding readers and writers retire
+before those pages are reclaimed. These relationships motivate an interface
+between scheduling and memory management rather than a replacement for each
+underlying system.
 
 \section{Limitations and Research Questions}
 \label{sec:limits}
@@ -125,16 +123,13 @@ communication must be remeasured on each target. In particular, the observed
 context-switch diagnostic cannot specify a worst-case scheduling bound.
 
 \section{Conclusion}
-GPU sharing requires more than placing additional kernels beside a model.
-It requires a contract for what work can stop, what state survives, what
-resources are actually returned, and how much foreground slack admission
-is allowed to spend. \system{} specifies that contract across processes,
-compiler slices, resource leases, and hardware services. The component
-evidence supports useful bounded execution and selected sharing opportunities,
-while exposing costs that simpler utilization arguments miss. The architectural
-goal is a general GPU operating system; the present contribution is a
-specified path toward that goal with explicit implementation and evidence
-boundaries.
+GPUOS specifies what a shared GPU task may consume, what suspension
+preserves, and which resources an acknowledgement returns. Versioned leases
+connect compiler checkpoints, storage lifetime, and slack admission. The
+conditional safety argument identifies the assumptions needed for that
+contract; component evidence demonstrates selected opportunities and exposes
+backend-specific costs. A general deployed OS still requires the integration
+and enforcement services identified in this design.
 
 \paragraph{Artifact and drafting disclosure.}
 The repository includes raw timings, hashes, numerical checks, and build

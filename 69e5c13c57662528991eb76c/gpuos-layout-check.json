@@ -1,6 +1,6 @@
 {
-  "entry_point": "69e5c13c57662528991eb76c/main.tex",
-  "format": "Unmodified IEEEtran conference, 10 pt, letterpaper",
+  "entry_point": "main.tex",
+  "format": "IEEEtran conference, 10 pt, letterpaper",
   "body_pages": 12,
   "reference_pages": 1,
   "references_start_page": 13,
@@ -14,20 +14,18 @@
     {
       "label": "fig:execution",
       "number": 2,
-      "page": 5
+      "page": 6
     }
   ],
   "figure_sha256": {
     "01_system_architecture.pdf": "6386d7b3fee2eac88e3ef4a65b7d94c47ff7c5a7cdf3faf90954f3e8041b91c5",
     "02_execution_storage.pdf": "f3873c915341f4848a39150f77bd797ab5687c73fe1cf01bd13f0dcc51facaf3"
   },
-  "original_figure_sources": {
-    "01_system_architecture.pdf": "img/gpuos_persistent_jit_tikz.pdf",
-    "02_execution_storage.pdf": "osdi/figures/system-overview.pdf"
-  },
   "original_artwork_byte_identical": true,
-  "pdf_sha256": "b7e930f1101a0bdb16a6cf32c1246c4868e8eccc1db8245f1655ec72c4b5ab02",
+  "pdf_sha256": "d15a13817d677be4f97fc77ed42080a91b5fe941132f99a0cd180b131c110190",
   "overfull_boxes": 0,
   "undefined_references": 0,
-  "visual_review": "Restored diagram pages 4 and 5 rendered and inspected; original artwork unchanged."
+  "bibtex_warnings": 0,
+  "bibliography_entries": 14,
+  "validation_command": "python3 gpuos/build.py --package --verify-package"
 }
